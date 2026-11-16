@@ -3,12 +3,13 @@ use std::{
     fs,
     io::{self, stdout},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-        MouseEventKind,
+        MouseEventKind, DisableFocusChange, EnableFocusChange,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -20,6 +21,78 @@ use ratatui::{
     widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, TableState},
     Terminal,
 };
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    #[serde(default = "default_viewer")]
+    viewer: Option<String>,
+    #[serde(default)]
+    viewer_args: Vec<String>,
+}
+
+fn default_viewer() -> Option<String> {
+    Some(String::from("zathura"))
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            viewer: default_viewer(),
+            viewer_args: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    /// Retorna o caminho ~/.config/marginalia/config.toml
+    fn caminho_config() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("marginalia").join("config.toml"))
+    }
+
+    /// Carrega o dotfile ou cria um arquivo padrão se não existir
+    fn carregar_ou_criar() -> (Self, Option<String>) {
+        let Some(path) = Self::caminho_config() else {
+            return (Self::default(), Some("Diretório de config não encontrado, usando padrão.".into()));
+        };
+
+        if !path.exists() {
+            let cfg = Self::default();
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let conteudo_inicial = format!(
+                "# Ordem de preferência dos visualizadores de PDF\n\
+                 # Se nenhum estiver instalado, usa o padrão do sistema.\n{}",
+                toml::to_string_pretty(&cfg).unwrap_or_default()
+            );
+            let _ = fs::write(&path, conteudo_inicial);
+            return (cfg, Some(format!("Config criada em: {}", path.display())));
+        }
+
+        match fs::read_to_string(&path) {
+            Ok(conteudo) => match toml::from_str::<Config>(&conteudo) {
+                Ok(cfg) => (cfg, None),
+                Err(e) => (
+                    Self::default(),
+                    Some(format!("Erro no config.toml ({}), usando padrão.", e)),
+                ),
+            },
+            Err(e) => (
+                Self::default(),
+                Some(format!("Erro ao ler config.toml: {}", e)),
+            ),
+        }
+    }
+
+    fn nome_viewer_exibicao(&self) -> &str {
+        self.viewer
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or("padrão do sistema")
+    }
+}
 
 /// Estrutura que representa cada artigo/PDF encontrado
 struct Artigo {
@@ -34,20 +107,38 @@ struct App {
     state: TableState,
     area_tabela: Rect, // Guardamos a área da tabela para calcular cliques do mouse
     status_msg: String,
+    config: Config,
 }
 
 impl App {
-    fn new(artigos: Vec<Artigo>) -> Self {
+    fn new(artigos: Vec<Artigo>, config: Config, aviso_config: Option<String>) -> Self {
         let mut state = TableState::default();
         if !artigos.is_empty() {
-            state.select(Some(0)); // Seleciona o primeiro item por padrão
+            state.select(Some(0));
         }
+
+        let status_msg = aviso_config.unwrap_or_else(|| {
+            format!(
+                "Preferência: {:?} | Enter/Clique: abrir | 'r': recarregar config | 'q': sair",
+                config.nome_viewer_exibicao()
+            )
+        });
+
         Self {
             artigos,
             state,
             area_tabela: Rect::default(),
-            status_msg: String::from("Use ↑/↓ ou clique para selecionar. Enter ou clique para abrir. 'q' para sair."),
+            status_msg,
+            config,
         }
+    }
+
+    fn recarregar_config(&mut self) {
+        let (nova_config, aviso) = Config::carregar_ou_criar();
+        self.config = nova_config;
+        self.status_msg = aviso.unwrap_or_else(|| {
+            format!("Config recarregada! Viewer: {}", self.config.nome_viewer_exibicao())
+        });
     }
 
     fn proximo(&mut self) {
@@ -55,14 +146,8 @@ impl App {
             return;
         }
         let i = match self.state.selected() {
-            Some(i) => {
-                if i >= self.artigos.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
+            Some(i) if i < self.artigos.len() - 1 => i + 1,
+            _ => 0,
         };
         self.state.select(Some(i));
     }
@@ -72,25 +157,21 @@ impl App {
             return;
         }
         let i = match self.state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.artigos.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
+            Some(i) if i > 0 => i - 1,
+            _ => self.artigos.len() - 1,
         };
         self.state.select(Some(i));
     }
 
-    /// Abre o PDF selecionado usando o programa padrão do sistema operacional
     fn abrir_selecionado(&mut self) {
         if let Some(i) = self.state.selected() {
             if let Some(artigo) = self.artigos.get(i) {
-                match open::that(&artigo.caminho) {
-                    Ok(_) => {
-                        self.status_msg = format!("Abrindo: {}", artigo.nome);
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+                let _ = io::Write::flush(&mut io::stdout());
+
+                match abrir_com_config(&artigo.caminho, &self.config) {
+                    Ok(viewer) => {
+                        self.status_msg = format!("Abrindo '{}' com {}", artigo.nome, viewer);
                     }
                     Err(e) => {
                         self.status_msg = format!("Erro ao abrir {}: {}", artigo.nome, e);
@@ -100,10 +181,7 @@ impl App {
         }
     }
 
-    /// Calcula qual linha foi clicada com base nas coordenadas (x, y) do mouse
     fn lidar_clique_mouse(&mut self, col: u16, row: u16) {
-        // Verifica se o clique ocorreu dentro da área interna da tabela
-        // +1 na borda superior e +1 no cabeçalho da tabela = offset de 2 linhas
         let inicio_linhas_y = self.area_tabela.y + 2;
         let fim_linhas_y = self.area_tabela.y + self.area_tabela.height.saturating_sub(1);
 
@@ -112,7 +190,6 @@ impl App {
             && row >= inicio_linhas_y
             && row < fim_linhas_y
         {
-            // Calcula o índice visual somado ao deslocamento (scroll) atual da tabela
             let linha_clicada = (row - inicio_linhas_y) as usize;
             let indice_real = self.state.offset() + linha_clicada;
 
@@ -124,7 +201,33 @@ impl App {
     }
 }
 
-/// Lê os arquivos PDF de um diretório
+/// Tenta abrir com: 1) PDF_VIEWER env -> 2) `viewer` do dotfile -> 3) padrão do SO
+fn abrir_com_config(caminho: &Path, config: &Config) -> Result<String, String> {
+    let viewer_escolhido = env::var("PDF_VIEWER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| config.viewer.clone().filter(|v| !v.trim().is_empty()));
+
+    if let Some(viewer) = viewer_escolhido {
+        let res = Command::new(&viewer)
+            .args(&config.viewer_args)
+            .arg(caminho)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        if res.is_ok() {
+            return Ok(viewer);
+        }
+    }
+
+    // Fallback para o visualizador padrão do sistema operacional
+    open::that_detached(caminho)
+        .map(|_| String::from("padrão do sistema (fallback)"))
+        .map_err(|e| e.to_string())
+}
+
 fn carregar_artigos(dir: &Path) -> io::Result<Vec<Artigo>> {
     let mut artigos = Vec::new();
 
@@ -156,13 +259,11 @@ fn carregar_artigos(dir: &Path) -> io::Result<Vec<Artigo>> {
         }
     }
 
-    // Ordena alfabeticamente
     artigos.sort_by(|a, b| a.nome.to_lowercase().cmp(&b.nome.to_lowercase()));
     Ok(artigos)
 }
 
 fn main() -> io::Result<()> {
-    // Pega o diretório via argumento CLI ou usa o diretório atual "."
     let args: Vec<String> = env::args().collect();
     let dir_path = if args.len() > 1 {
         PathBuf::from(&args[1])
@@ -171,23 +272,28 @@ fn main() -> io::Result<()> {
     };
 
     let artigos = carregar_artigos(&dir_path)?;
+    let (config, aviso_config) = Config::carregar_ou_criar();
 
-    // Configuração do Terminal (Raw Mode + Alternate Screen + Mouse)
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableFocusChange
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(artigos);
+    let mut app = App::new(artigos, config, aviso_config);
     let res = run_app(&mut terminal, &mut app);
 
-    // Restaura o terminal antes de encerrar (essencial para não quebrar o shell)
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableFocusChange
     )?;
     terminal.show_cursor()?;
 
@@ -204,16 +310,14 @@ fn run_app<B: ratatui::backend::Backend>(
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| {
-            // Divide a tela: Tabela principal e barra de status inferior
-            let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(f.area());
+            let chunks =
+                Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(f.area());
             app.area_tabela = chunks[0];
 
-            // Cabeçalho da Tabela
             let header = Row::new(vec!["Título do Artigo", "Tamanho", "Caminho"])
                 .style(Style::default().fg(Color::Yellow).bold())
                 .height(1);
 
-            // Linhas da Tabela
             let rows: Vec<Row> = app
                 .artigos
                 .iter()
@@ -227,7 +331,6 @@ fn run_app<B: ratatui::backend::Backend>(
                 })
                 .collect();
 
-            // Largura das colunas
             let widths = [
                 Constraint::Percentage(50),
                 Constraint::Length(12),
@@ -252,23 +355,33 @@ fn run_app<B: ratatui::backend::Backend>(
 
             f.render_stateful_widget(table, chunks[0], &mut app.state);
 
-            // Barra de Status
             let status = Paragraph::new(app.status_msg.clone())
                 .block(Block::default().borders(Borders::ALL).title(" Status "));
             f.render_widget(status, chunks[1]);
         })?;
 
-        // Captura de Eventos (Teclado e Mouse)
         match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Down | KeyCode::Char('j') => app.proximo(),
-                KeyCode::Up | KeyCode::Char('k') => app.anterior(),
-                KeyCode::Enter => app.abrir_selecionado(),
-                _ => {}
-            },
+            Event::FocusLost => {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+                let _ = io::Write::flush(&mut io::stdout());
+            }
+            Event::FocusGained => {
+                let _ = execute!(io::stdout(), EnableMouseCapture);
+                let _ = io::Write::flush(&mut io::stdout());
+            }
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let _ = execute!(io::stdout(), EnableMouseCapture);
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Down | KeyCode::Char('j') => app.proximo(),
+                    KeyCode::Up | KeyCode::Char('k') => app.anterior(),
+                    KeyCode::Enter => app.abrir_selecionado(),
+                    KeyCode::Char('r') => app.recarregar_config(),
+                    _ => {}
+                }
+            }
             Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
+                MouseEventKind::Up(MouseButton::Left) => {
                     app.lidar_clique_mouse(mouse.column, mouse.row);
                 }
                 MouseEventKind::ScrollDown => app.proximo(),
