@@ -56,10 +56,10 @@ impl App {
             if let Some(artigo) = self.artigos.get(i) {
                 match opener.open(&artigo.caminho, &self.config) {
                     Ok(viewer) => {
-                        self.status_msg = format!("Abrindo '{}' com {}", artigo.nome, viewer);
+                        self.status_msg = format!("Abrindo '{}' com {}", artigo.titulo, viewer);
                     }
                     Err(e) => {
-                        self.status_msg = format!("Erro ao abrir {}: {}", artigo.nome, e);
+                        self.status_msg = format!("Erro ao abrir {}: {}", artigo.titulo, e);
                     }
                 }
             }
@@ -90,17 +90,17 @@ impl App {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::path::PathBuf;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    /// Mock que registra qual arquivo foi aberto sem disparar processos externos
     struct MockOpener {
         ultimo_aberto: RefCell<Option<PathBuf>>,
     }
 
     impl MockOpener {
         fn new() -> Self {
-            Self { ultimo_aberto: RefCell::new(None) }
+            Self {
+                ultimo_aberto: RefCell::new(None),
+            }
         }
     }
 
@@ -111,11 +111,21 @@ mod tests {
         }
     }
 
+    fn artigo_teste(titulo: &str, path: &str) -> Artigo {
+        Artigo {
+            titulo: titulo.into(),
+            nome_arquivo: titulo.into(),
+            meta: Default::default(),
+            caminho: PathBuf::from(path),
+            tamanho_kb: 100,
+        }
+    }
+
     fn criar_artigos_exemplo() -> Vec<Artigo> {
         vec![
-            Artigo { nome: "Artigo 1".into(), caminho: PathBuf::from("/tmp/1.pdf"), tamanho_kb: 10 },
-            Artigo { nome: "Artigo 2".into(), caminho: PathBuf::from("/tmp/2.pdf"), tamanho_kb: 20 },
-            Artigo { nome: "Artigo 3".into(), caminho: PathBuf::from("/tmp/3.pdf"), tamanho_kb: 30 },
+            artigo_teste("Artigo 1", "/tmp/1.pdf"),
+            artigo_teste("Artigo 2", "/tmp/2.pdf"),
+            artigo_teste("Artigo 3", "/tmp/3.pdf"),
         ]
     }
 
@@ -145,7 +155,10 @@ mod tests {
         app.lidar_clique_mouse(10, 3, &opener);
 
         assert_eq!(app.state.selected(), Some(1));
-        assert_eq!(*opener.ultimo_aberto.borrow(), Some(PathBuf::from("/tmp/2.pdf")));
+        assert_eq!(
+            *opener.ultimo_aberto.borrow(),
+            Some(PathBuf::from("/tmp/2.pdf"))
+        );
         assert!(app.status_msg.contains("Artigo 2"));
     }
 

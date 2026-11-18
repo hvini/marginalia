@@ -1,5 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod library;
+pub mod metadata;
 pub mod opener;
+pub mod pdf_texto;
 pub mod ui;

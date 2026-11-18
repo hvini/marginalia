@@ -1,93 +1,197 @@
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
-use crate::app::App;
+use crate::{app::App, library::Artigo};
+
+const SIMBOLO_SELECAO: &str = "▶ ";
 
 pub fn render(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).split(f.area());
-    app.area_tabela = chunks[0];
+    // Painel de detalhes só quando há altura para a tabela continuar útil
+    let altura_detalhes = if f.area().height >= 22 { f.area().height * 2 / 5 } else { 0 };
+    let [area_tabela, area_detalhes, area_status] = Layout::vertical([
+        Constraint::Min(5),
+        Constraint::Length(altura_detalhes),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
+    app.area_tabela = area_tabela;
 
-    let header = Row::new(vec!["Título do Artigo", "Tamanho", "Caminho"])
-        .style(Style::default().fg(Color::Yellow).bold())
-        .height(1);
+    render_tabela(f, app, area_tabela);
+    if altura_detalhes > 0 {
+        let selecionado = app.state.selected().and_then(|i| app.artigos.get(i));
+        render_detalhes(f, selecionado, area_detalhes);
+    }
+    f.render_widget(Paragraph::new(format!(" {}", app.status_msg)).fg(Color::Gray).bg(Color::DarkGray), area_status);
+}
 
-    let rows: Vec<Row> = app
-        .artigos
-        .iter()
-        .map(|artigo| {
-            Row::new(vec![
-                Cell::from(artigo.nome.clone()),
-                Cell::from(format!("{} KB", artigo.tamanho_kb)),
-                Cell::from(artigo.caminho.to_string_lossy().to_string()),
-            ])
-            .height(1)
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Percentage(50),
-        Constraint::Length(12),
-        Constraint::Percentage(38),
+fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
+    let larguras = [
+        Constraint::Fill(5), // Título
+        Constraint::Fill(2), // Autores
+        Constraint::Fill(3), // Venue
+        Constraint::Length(4), // Ano
+        Constraint::Length(4), // Págs
+        Constraint::Length(4), // Refs
     ];
+    // Mesmas colunas que a Table vai calcular, para cortar o texto com reticências
+    let interno = Rect { width: area.width.saturating_sub(2 + SIMBOLO_SELECAO.chars().count() as u16), ..area };
+    let colunas: Vec<usize> = Layout::horizontal(larguras).spacing(1).split(interno).iter().map(|r| r.width as usize).collect();
 
-    let table = Table::new(rows, widths)
+    let header = Row::new(["Título", "Autores", "Conferência / Journal", "Ano", "Págs", "Refs"])
+        .style(Style::default().fg(Color::Yellow).bold());
+
+    let rows = app.artigos.iter().map(|a| {
+        let m = &a.meta;
+        let celulas = [
+            a.titulo.clone(),
+            autores_curto(m.autores.as_deref()),
+            m.venue.clone().unwrap_or_else(|| "—".into()),
+            m.ano.clone().unwrap_or_else(|| "—".into()),
+            if m.paginas > 0 { m.paginas.to_string() } else { "—".into() },
+            m.n_referencias.map_or("—".into(), |n| n.to_string()),
+        ];
+        Row::new(celulas.iter().zip(&colunas).map(|(t, &w)| Cell::from(cortar(t, w))))
+    });
+
+    let table = Table::new(rows, larguras)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Biblioteca de Artigos ({} PDFs) ", app.artigos.len())),
-        )
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ")
+        .column_spacing(1)
+        .block(Block::default().borders(Borders::ALL).title(format!(" Biblioteca de Artigos ({} PDFs) ", app.artigos.len())))
+        .row_highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+        .highlight_symbol(SIMBOLO_SELECAO)
         .highlight_spacing(HighlightSpacing::Always);
 
-    f.render_stateful_widget(table, chunks[0], &mut app.state);
+    f.render_stateful_widget(table, area, &mut app.state);
+}
 
-    let status = Paragraph::new(app.status_msg.clone())
-        .block(Block::default().borders(Borders::ALL).title(" Status "));
-    f.render_widget(status, chunks[1]);
+fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {
+    let bloco = Block::default().borders(Borders::ALL).title(" Detalhes ");
+    let Some(a) = artigo else {
+        f.render_widget(Paragraph::new("Nenhum artigo selecionado").block(bloco), area);
+        return;
+    };
+    let m = &a.meta;
+    let rotulo = |r: &'static str| Span::styled(r, Style::default().fg(Color::Yellow));
+    let campo = |r: &'static str, v: Option<String>| v.map(|v| Line::from(vec![rotulo(r), Span::raw(v)]));
+
+    let publicacao = [
+        m.venue.clone(),
+        m.volume.as_ref().map(|v| format!("vol. {v}")),
+        m.intervalo_paginas.as_ref().map(|p| format!("pp. {p}")),
+        m.ano.clone(),
+    ];
+    let identificadores = [
+        m.doi.as_ref().map(|d| format!("DOI {d}")),
+        m.arxiv.as_ref().map(|x| format!("arXiv {x}")),
+        (m.paginas > 0).then(|| format!("{} páginas", m.paginas)),
+        m.n_referencias.map(|n| format!("{n} referências")),
+        Some(format!("{} ({} KB)", a.nome_arquivo, a.tamanho_kb)),
+    ];
+
+    let mut linhas = vec![Line::from(a.titulo.clone()).bold()];
+    linhas.extend([
+        campo("Autores: ", m.autores.clone()),
+        campo("Publicação: ", juntar(&publicacao)),
+        juntar(&identificadores).map(|t| Line::from(t).fg(Color::Gray)),
+        campo("Palavras-chave: ", m.palavras_chave.clone()),
+    ].into_iter().flatten());
+    if let Some(r) = &m.resumo {
+        linhas.push(Line::default());
+        linhas.push(Line::from(r.clone()).italic());
+    }
+
+    f.render_widget(Paragraph::new(linhas).wrap(Wrap { trim: true }).block(bloco), area);
+}
+
+fn juntar(partes: &[Option<String>]) -> Option<String> {
+    let v: Vec<&str> = partes.iter().flatten().map(String::as_str).collect();
+    (!v.is_empty()).then(|| v.join(" · "))
+}
+
+/// "Coupé et al.", "Silva & Doe", "Silva" — a lista completa fica no painel de detalhes
+fn autores_curto(autores: Option<&str>) -> String {
+    let Some(a) = autores else { return "—".into() };
+    let sobrenomes: Vec<&str> = a.split(';').filter_map(|n| n.split_whitespace().last()).collect();
+    match sobrenomes.as_slice() {
+        [] => "—".into(),
+        [s] => s.to_string(),
+        [s1, s2] => format!("{s1} & {s2}"),
+        [s, ..] => format!("{s} et al."),
+    }
+}
+
+/// Corta em `largura` colunas terminando com "…"
+fn cortar(s: &str, largura: usize) -> String {
+    if s.chars().count() <= largura {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(largura.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, library::Artigo};
+    use crate::{config::Config, metadata::PdfMetadata};
     use ratatui::{backend::TestBackend, Terminal};
     use std::path::PathBuf;
 
-    #[test]
-    fn deve_renderizar_tabela_e_status_corretamente() {
+    fn tela(app: &mut App, largura: u16, altura: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(largura, altura)).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn app_exemplo() -> App {
         let artigos = vec![Artigo {
-            nome: "Arquitetura Limpa".into(),
-            caminho: PathBuf::from("/docs/clean.pdf"),
+            titulo: "Hippocampal-amygdalo-ventricular atrophy score: Alzheimer disease detection using normative and pathological lifespan models".into(),
+            nome_arquivo: "coupe".into(),
+            meta: PdfMetadata {
+                autores: Some("Pierrick Coupé; José V. Manjon; Boris Mansencal".into()),
+                venue: Some("Human Brain Mapping".into()),
+                ano: Some("2022".into()),
+                paginas: 13,
+                n_referencias: Some(35),
+                doi: Some("10.1002/hbm.25850".into()),
+                ..Default::default()
+            },
+            caminho: PathBuf::from("/docs/coupe.pdf"),
             tamanho_kb: 512,
         }];
-        let mut app = App::new(artigos, Config::default(), None);
+        App::new(artigos, Config::default(), None)
+    }
 
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
+    #[test]
+    fn tabela_corta_textos_longos_e_detalhes_mostram_completo() {
+        let conteudo = tela(&mut app_exemplo(), 100, 30);
+        assert!(conteudo.contains("Biblioteca de Artigos (1 PDFs)"));
+        assert!(conteudo.contains("Coupé et al."));
+        assert!(conteudo.contains('…'));
+        assert!(conteudo.contains("Pierrick Coupé; José V. Manjon; Boris Mansencal"));
+        assert!(conteudo.contains("DOI 10.1002/hbm.25850"));
+        assert!(conteudo.contains("35 referências"));
+    }
 
-        terminal.draw(|f| render(f, &mut app)).unwrap();
+    #[test]
+    fn terminal_baixo_oculta_painel_de_detalhes() {
+        let conteudo = tela(&mut app_exemplo(), 80, 12);
+        assert!(conteudo.contains("Coupé et"));
+        assert!(!conteudo.contains("Detalhes"));
+    }
 
-        let buffer = terminal.backend().buffer();
-        let conteudo_tela: String = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-
-        assert!(conteudo_tela.contains("Biblioteca de Artigos (1 PDFs)"));
-        assert!(conteudo_tela.contains("Arquitetura Limpa"));
-        assert!(conteudo_tela.contains("512 KB"));
-        assert!(conteudo_tela.contains("Status"));
+    #[test]
+    fn deve_abreviar_autores_e_cortar_com_reticencias() {
+        assert_eq!(autores_curto(Some("Ana Silva")), "Silva");
+        assert_eq!(autores_curto(Some("Ana Silva; John Doe")), "Silva & Doe");
+        assert_eq!(autores_curto(Some("Ana Silva; John Doe; Mary Roe")), "Silva et al.");
+        assert_eq!(autores_curto(None), "—");
+        assert_eq!(cortar("abcdef", 4), "abc…");
+        assert_eq!(cortar("abc", 4), "abc");
     }
 }

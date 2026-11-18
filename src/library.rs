@@ -1,8 +1,11 @@
+use crate::metadata::PdfMetadata;
 use std::{fs, io, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artigo {
-    pub nome: String,
+    pub titulo: String,
+    pub nome_arquivo: String,
+    pub meta: PdfMetadata,
     pub caminho: PathBuf,
     pub tamanho_kb: u64,
 }
@@ -23,12 +26,15 @@ pub fn carregar_artigos(dir: &Path) -> io::Result<Vec<Artigo>> {
                     .to_string();
 
                 let tamanho_kb = fs::metadata(&path)?.len() / 1024;
-                artigos.push(Artigo { nome, caminho: path, tamanho_kb });
+                let meta = crate::metadata::extrair_metadados(&path);
+
+                let titulo = meta.titulo.clone().unwrap_or_else(|| nome.clone());
+                artigos.push(Artigo { titulo, nome_arquivo: nome, meta, caminho: path, tamanho_kb });
             }
         }
     }
 
-    artigos.sort_by(|a, b| a.nome.to_lowercase().cmp(&b.nome.to_lowercase()));
+    artigos.sort_by(|a, b| a.titulo.to_lowercase().cmp(&b.titulo.to_lowercase()));
     Ok(artigos)
 }
 
@@ -53,8 +59,8 @@ mod tests {
         let artigos = carregar_artigos(dir.path()).unwrap();
 
         assert_eq!(artigos.len(), 2);
-        assert_eq!(artigos[0].nome, "Algoritmo");
+        assert_eq!(artigos[0].titulo, "Algoritmo");
         assert_eq!(artigos[0].tamanho_kb, 2);
-        assert_eq!(artigos[1].nome, "zebra");
+        assert_eq!(artigos[1].titulo, "zebra");
     }
 }
