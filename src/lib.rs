@@ -4,6 +4,7 @@ pub mod bibtex;
 pub mod cache;
 pub mod config;
 pub mod grafo;
+pub mod inicio;
 pub mod library;
 pub mod metadata;
 pub mod notas;

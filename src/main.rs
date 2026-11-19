@@ -18,22 +18,16 @@ use marginalia::{
     app::{App, Lado},
     cache::Cache,
     config::Config,
+    inicio,
     library::carregar_artigos,
     opener::{PdfOpener, SystemOpener},
     ui,
 };
 
 fn main() -> io::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let dir_path = if args.len() > 1 {
-        PathBuf::from(&args[1])
-    } else {
-        PathBuf::from(".")
-    };
-
-    let artigos = carregar_artigos(&dir_path, Cache::caminho_padrao().as_deref())?;
+    // com um caminho na linha de comando, pula a tela de abertura
+    let dir_arg = env::args().nth(1).map(PathBuf::from);
     let (config, aviso_config) = Config::carregar_ou_criar();
-    let opener = SystemOpener;
 
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -46,11 +40,8 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(artigos, config, aviso_config);
-    app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
-    app.carregar_anotacoes(dir_path.join(marginalia::anotacoes::NOME_ARQUIVO));
-    app.definir_dir_notas(dir_path.join(marginalia::notas::PASTA));
-    let res = run_app(&mut terminal, &mut app, &opener, &dir_path);
+    // erros só são impressos depois de restaurar o terminal
+    let res = executar(&mut terminal, dir_arg, config, aviso_config);
 
     disable_raw_mode()?;
     execute!(
@@ -66,6 +57,56 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn executar<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    dir_arg: Option<PathBuf>,
+    config: Config,
+    aviso_config: Option<String>,
+) -> io::Result<()> {
+    let dir_path = match dir_arg {
+        Some(dir) => dir,
+        None => match escolher_pasta(terminal)? {
+            Some(dir) => dir,
+            None => return Ok(()),
+        },
+    };
+    terminal.draw(|f| inicio::render_carregando(f, &dir_path))?;
+    let artigos = carregar_artigos(&dir_path, Cache::caminho_padrao().as_deref())?;
+
+    let mut app = App::new(artigos, config, aviso_config);
+    app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
+    app.carregar_anotacoes(dir_path.join(marginalia::anotacoes::NOME_ARQUIVO));
+    app.definir_dir_notas(dir_path.join(marginalia::notas::PASTA));
+    run_app(terminal, &mut app, &SystemOpener, &dir_path)
+}
+
+/// Tela de abertura; `None` se o usuário sair sem escolher
+fn escolher_pasta<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>) -> io::Result<Option<PathBuf>> {
+    let inicial = env::current_dir().ok().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("."));
+    let mut nav = inicio::Navegador::new(&inicial);
+    loop {
+        terminal.draw(|f| inicio::render(f, &mut nav))?;
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => nav.mover(-1),
+                KeyCode::Down | KeyCode::Char('j') => nav.mover(1),
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    if let Some(dir) = nav.ativar() {
+                        return Ok(Some(dir));
+                    }
+                }
+                KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => nav.subir(),
+                KeyCode::Char('~') => nav.ir_para_inicio(),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                _ => {}
+            },
+            Event::Mouse(m) if m.kind == MouseEventKind::ScrollDown => nav.mover(1),
+            Event::Mouse(m) if m.kind == MouseEventKind::ScrollUp => nav.mover(-1),
+            _ => {}
+        }
+    }
 }
 
 /// Suspende a TUI, roda o editor no terminal e restaura a TUI ao voltar
