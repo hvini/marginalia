@@ -581,11 +581,10 @@ fn glifo(nome: &str) -> Option<String> {
         let w: Option<Vec<u16>> = (0..hex.len()).step_by(4).map(|i| u16::from_str_radix(&hex[i..i + 4], 16).ok()).collect();
         return w.map(|w| String::from_utf16_lossy(&w));
     }
-    if let Some(hex) = nome.strip_prefix('u').filter(|h| (4..=6).contains(&h.len())) {
-        if let Some(c) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+    if let Some(hex) = nome.strip_prefix('u').filter(|h| (4..=6).contains(&h.len()))
+        && let Some(c) = u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
             return Some(c.to_string());
         }
-    }
     let em = |tab: &[&str], base: u32| tab.iter().position(|&n| n == nome).and_then(|i| char::from_u32(base + i as u32)).map(String::from);
     em(&ASCII, 0x20)
         .or_else(|| em(&LATIN1, 0xC0))

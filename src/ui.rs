@@ -1,12 +1,13 @@
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Wrap},
+    layout::Alignment,
+    widgets::{Block, BorderType, Borders, Cell, HighlightSpacing, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
-use crate::{anotacoes::Status, app::{App, COLUNAS}, library::Artigo};
+use crate::{anotacoes::Status, app::{App, Lado, VistaGrafo, COLUNAS}, library::Artigo};
 
 const SIMBOLO_SELECAO: &str = "▶ ";
 
@@ -21,11 +22,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
     .areas(f.area());
     app.area_tabela = area_tabela;
 
-    render_tabela(f, app, area_tabela);
+    if let Some(v) = &app.vista_grafo {
+        render_grafo(f, app, v, area_tabela);
+    } else {
+        render_tabela(f, app, area_tabela);
+    }
     if altura_detalhes > 0 {
-        let nota = app.state.selected().and_then(|s| app.visiveis.get(s)).filter(|i| app.com_nota.contains(i))
-            .zip(app.dir_notas.as_ref()).map(|(&i, dir)| crate::notas::caminho(dir, &app.artigos[i]));
-        render_detalhes(f, app.selecionado(), nota, area_detalhes);
+        // no grafo, os detalhes acompanham o cursor do grafo
+        let sel = if app.vista_grafo.is_some() { app.artigo_grafo() } else { app.indice_selecionado() };
+        let nota = sel.filter(|i| app.com_nota.contains(i))
+            .zip(app.dir_notas.as_ref()).map(|(i, dir)| crate::notas::caminho(dir, &app.artigos[i]));
+        let citacoes = sel.map(|i| linha_citacoes(app, i)).unwrap_or_default();
+        render_detalhes(f, sel.map(|i| &app.artigos[i]), nota, citacoes, area_detalhes);
     }
     let status = if let Some(tags) = &app.editando_tags {
         Paragraph::new(format!(" Tags (separadas por vírgula): {tags}█   (Enter salva, Esc cancela)")).fg(Color::Black).bg(Color::Cyan)
@@ -112,7 +120,7 @@ fn titulo_tabela(app: &App) -> String {
     t
 }
 
-fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, nota: Option<std::path::PathBuf>, area: Rect) {
+fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, nota: Option<std::path::PathBuf>, citacoes: Option<Line<'static>>, area: Rect) {
     let bloco = Block::default().borders(Borders::ALL).title(" Detalhes ");
     let Some(a) = artigo else {
         f.render_widget(Paragraph::new("Nenhum artigo selecionado").block(bloco), area);
@@ -148,6 +156,7 @@ fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, nota: Option<std::pat
         ])),
         campo("Autores: ", m.autores.clone()),
         campo("Publicação: ", juntar(&publicacao)),
+        citacoes,
         juntar(&identificadores).map(|t| Line::from(t).fg(Color::Gray)),
         campo("Palavras-chave: ", m.palavras_chave.clone()),
     ].into_iter().flatten());
@@ -157,6 +166,201 @@ fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, nota: Option<std::pat
     }
 
     f.render_widget(Paragraph::new(linhas).wrap(Wrap { trim: true }).block(bloco), area);
+}
+
+/// "Cita: Coupé 2022, Silva 2019   Citado por: Doe 2023" — só citações entre PDFs locais
+fn linha_citacoes(app: &App, i: usize) -> Option<Line<'static>> {
+    let nomes = |v: &[usize]| v.iter().map(|&j| rotulo_curto(&app.artigos[j])).collect::<Vec<_>>().join(", ");
+    let (cita, citado) = (&app.grafo.cita[i], &app.grafo.citado_por[i]);
+    if cita.is_empty() && citado.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    if !cita.is_empty() {
+        spans.extend([Span::styled("Cita: ", Style::default().fg(COR_CITA)), Span::raw(nomes(cita) + "   ")]);
+    }
+    if !citado.is_empty() {
+        spans.extend([Span::styled("Citado por: ", Style::default().fg(COR_CITADO)), Span::raw(nomes(citado))]);
+    }
+    Some(Line::from(spans))
+}
+
+const COR_CITA: Color = Color::Cyan;
+const COR_CITADO: Color = Color::Magenta;
+
+/// "Coupé 2022"; sem autor, o começo do título
+fn rotulo_curto(a: &Artigo) -> String {
+    let autor = a.meta.autores.as_deref().and_then(|s| s.split(';').next()?.split_whitespace().last().map(String::from));
+    let nome = cortar(&autor.unwrap_or_else(|| a.titulo.clone()), 14);
+    a.meta.ano.as_ref().map_or(nome.clone(), |ano| format!("{nome} {ano}"))
+}
+
+/// Grafo centrado no foco: à esquerda o que ele cita, à direita quem o cita (do mais antigo ao mais recente).
+fn render_grafo(f: &mut Frame, app: &App, v: &VistaGrafo, area: Rect) {
+    let tecla = |t: &'static str| Span::styled(t, Style::default().fg(Color::Yellow));
+    let ajuda = Line::from(vec![
+        Span::raw(" "), tecla("↑↓"), Span::raw(" escolher  "), tecla("←→"), Span::raw(" coluna  "),
+        tecla("Enter"), Span::raw(" centralizar  "), tecla("Bksp"), Span::raw(" voltar  "),
+        tecla("o"), Span::raw(" abrir PDF  "), tecla("Esc"), Span::raw(" sair "),
+    ]);
+    // trilha de navegação: "Heister 2011 › Bartos 2019 › Coupé 2022"
+    let trilha: Vec<String> = v.historico.iter().chain([&v.foco]).map(|&i| rotulo_curto(&app.artigos[i])).collect();
+    let bloco = Block::default().borders(Borders::ALL).title(format!(" Citações · {} ", trilha.join(" › "))).title_bottom(ajuda);
+    let interno = bloco.inner(area);
+    f.render_widget(bloco, area);
+
+    let util = interno.inner(Margin { horizontal: 3, vertical: 1 });
+    if util.height < 5 || util.width < 40 {
+        return;
+    }
+
+    // colunas laterais só com "Sobrenome Ano" (o título completo está nos detalhes, que seguem o cursor),
+    // com a largura do maior rótulo; o conjunto fica centralizado
+    let colunas = [Lado::Cita, Lado::CitadoPor].map(|lado| app.coluna_grafo(lado));
+    let cabecalhos = [format!("CITA ({})", colunas[0].len()), format!("CITADO POR ({})", colunas[1].len())];
+    const VAZIA: &str = "nenhum PDF local";
+    let largura_col = |k: usize| {
+        let maior = colunas[k].iter().map(|&i| rotulo_curto(&app.artigos[i]).chars().count() + 2).max().unwrap_or(0);
+        maior.max(cabecalhos[k].len()).max(VAZIA.len()).min(24) as u16
+    };
+    let (larg_esq, larg_dir) = (largura_col(0), largura_col(1));
+    let largura_foco = util.width.saturating_sub(larg_esq + larg_dir + 8 + 6).clamp(24, 40);
+    let [esq, con_esq, centro, con_dir, dir] = Layout::horizontal([
+        Constraint::Length(larg_esq),
+        Constraint::Length(4),
+        Constraint::Length(largura_foco),
+        Constraint::Length(4),
+        Constraint::Length(larg_dir),
+    ])
+    .flex(Flex::Center)
+    .areas(util);
+    let corpo_y = util.y + 2;
+    let corpo_h = util.height - 2;
+    let meio = corpo_h / 2; // linha (relativa ao corpo) onde os conectores encontram o foco
+
+    // cartão do foco
+    let foco = &app.artigos[v.foco];
+    let publicacao = juntar(&[foco.meta.venue.clone(), foco.meta.ano.clone()]).unwrap_or_default();
+    // shortcut: estimativa da quebra de linha (palavras longas podem gastar uma linha a mais)
+    let largura_texto = largura_foco.saturating_sub(4).max(1) as usize;
+    let linhas = |t: &str| t.chars().count().div_ceil(largura_texto).max(1) as u16;
+    let altura_cartao = (linhas(&foco.titulo) + linhas(&publicacao) + 3).min(corpo_h);
+    let cartao = Rect { x: centro.x, y: corpo_y + meio.saturating_sub(altura_cartao / 2), width: centro.width, height: altura_cartao };
+    let texto_cartao = vec![
+        Line::from(foco.titulo.clone()).bold(),
+        Line::default(),
+        Line::from(publicacao).fg(Color::Gray),
+    ];
+    f.render_widget(
+        Paragraph::new(texto_cartao).wrap(Wrap { trim: true }).alignment(Alignment::Center).block(
+            Block::default().borders(Borders::ALL).border_type(BorderType::Thick).border_style(Style::default().fg(Color::Yellow))
+                .title(format!(" {} ", rotulo_curto(foco))).title_alignment(Alignment::Center)
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        cartao,
+    );
+    f.render_widget(Paragraph::new("EM FOCO").fg(Color::DarkGray).alignment(Alignment::Center), Rect { height: 1, ..centro });
+
+    for (k, (lado, coluna, area_conector, cor)) in [
+        (Lado::Cita, esq, con_esq, COR_CITA),
+        (Lado::CitadoPor, dir, con_dir, COR_CITADO),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ids = &colunas[k];
+        let ativo = v.lado == lado;
+        let alinhamento = if lado == Lado::Cita { Alignment::Right } else { Alignment::Left };
+        let em = |linha: u16| Rect { y: corpo_y + linha, height: 1, ..coluna };
+        let mut estilo_cab = Style::default().fg(cor);
+        if ativo {
+            estilo_cab = estilo_cab.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        }
+        f.render_widget(Paragraph::new(cabecalhos[k].as_str()).style(estilo_cab).alignment(alinhamento), Rect { height: 1, ..coluna });
+        if ids.is_empty() {
+            f.render_widget(Paragraph::new(VAZIA).fg(Color::DarkGray).alignment(alinhamento), em(meio));
+            continue;
+        }
+
+        // poucos artigos: uma linha de respiro entre eles; muitos: um por linha e a janela rola com o cursor,
+        // reservando a primeira e a última linha para os indicadores "↑ N" / "↓ N"
+        let n = ids.len() as u16;
+        let (passo, cabem) = if n * 2 - 1 <= corpo_h {
+            (2, n)
+        } else if n <= corpo_h {
+            (1, n)
+        } else {
+            (1, corpo_h.saturating_sub(2).max(1))
+        };
+        let cursor = if ativo { v.linha } else { 0 };
+        let inicio = (cursor + 1).saturating_sub(cabem as usize);
+        let mostrados = &ids[inicio..ids.len().min(inicio + cabem as usize)];
+        let altura_bloco = (mostrados.len() as u16 - 1) * passo + 1;
+        let rolando = n > cabem;
+        let topo = if rolando { 1 } else { meio.saturating_sub(altura_bloco / 2).min(corpo_h - altura_bloco) };
+
+        let mut ligacoes = Vec::new();
+        for (j, &i) in mostrados.iter().enumerate() {
+            let linha = topo + j as u16 * passo;
+            ligacoes.push(linha);
+            let estilo = if ativo && inicio + j == v.linha {
+                Style::default().fg(Color::Black).bg(Color::Yellow).bold()
+            } else {
+                Style::default().fg(cor)
+            };
+            let rotulo = format!(" {} ", cortar(&rotulo_curto(&app.artigos[i]), coluna.width.saturating_sub(2) as usize));
+            f.render_widget(Paragraph::new(Span::styled(rotulo, estilo)).alignment(alinhamento), em(linha));
+        }
+        if rolando {
+            let indicador = |t: String| Paragraph::new(t).fg(Color::DarkGray).alignment(alinhamento);
+            if inicio > 0 {
+                f.render_widget(indicador(format!("↑ {} ", inicio)), em(0));
+            }
+            let abaixo = ids.len() - inicio - mostrados.len();
+            if abaixo > 0 {
+                f.render_widget(indicador(format!("↓ {} ", abaixo)), em(corpo_h - 1));
+            }
+        }
+        let desenho: Vec<Line> = conector(corpo_h, &ligacoes, meio, lado == Lado::Cita).into_iter().map(Line::from).collect();
+        f.render_widget(Paragraph::new(desenho).fg(cor), Rect { y: corpo_y, height: corpo_h, ..area_conector });
+    }
+}
+
+/// Coluna de 4 caracteres ligando as linhas `ligacoes` (dos artigos) à linha `meio` (o foco) por um barramento
+/// vertical. `artigos_a_esquerda`: os artigos estão à esquerda do conector e o foco à direita.
+fn conector(altura: u16, ligacoes: &[u16], meio: u16, artigos_a_esquerda: bool) -> Vec<String> {
+    let (min, max) = ligacoes.iter().fold((meio, meio), |(a, b), &l| (a.min(l), b.max(l)));
+    (0..altura)
+        .map(|r| {
+            let artigo = ligacoes.contains(&r);
+            let foco = r == meio;
+            let (esq, dir) = if artigos_a_esquerda { (artigo, foco) } else { (foco, artigo) };
+            let barra = if r < min || r > max {
+                ' '
+            } else {
+                match (esq, dir, r > min, r < max) {
+                    (true, true, true, true) => '┼',
+                    (true, false, true, true) => '┤',
+                    (false, true, true, true) => '├',
+                    (false, false, true, true) => '│',
+                    (true, true, false, true) => '┬',
+                    (true, true, true, false) => '┴',
+                    (true, false, false, true) => '┐',
+                    (true, false, true, false) => '┘',
+                    (false, true, false, true) => '┌',
+                    (false, true, true, false) => '└',
+                    _ => '─', // segmento único, sem barramento
+                }
+            };
+            let tracos = |b: bool| if b { "──" } else { "  " };
+            let fim = |b: bool| if b { "─" } else { " " };
+            if artigos_a_esquerda {
+                format!("{}{barra}{}", tracos(esq), fim(dir))
+            } else {
+                format!("{}{barra}{}", fim(esq), tracos(dir))
+            }
+        })
+        .collect()
 }
 
 fn juntar(partes: &[Option<String>]) -> Option<String> {
@@ -249,6 +453,16 @@ mod tests {
         assert!(conteudo.contains("Para ler"));
         assert!(!conteudo.contains("Tags"), "coluna Tags some em terminal estreito");
         assert!(!conteudo.contains("Detalhes"));
+    }
+
+    #[test]
+    fn conector_liga_artigos_ao_foco_pelo_barramento() {
+        // artigos nas linhas 0 e 4, foco na 2, artigos à esquerda
+        assert_eq!(conector(5, &[0, 4], 2, true), ["──┐ ", "  │ ", "  ├─", "  │ ", "──┘ "]);
+        // espelhado, artigo único na linha do foco: traço reto
+        assert_eq!(conector(3, &[1], 1, false), ["    ", "────", "    "]);
+        // artigo acima do foco, à direita
+        assert_eq!(conector(3, &[0], 2, false), [" ┌──", " │  ", "─┘  "]);
     }
 
     #[test]

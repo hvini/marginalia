@@ -3,6 +3,7 @@ pub mod app;
 pub mod bibtex;
 pub mod cache;
 pub mod config;
+pub mod grafo;
 pub mod library;
 pub mod metadata;
 pub mod notas;

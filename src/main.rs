@@ -15,7 +15,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use marginalia::{
-    app::App,
+    app::{App, Lado},
     cache::Cache,
     config::Config,
     library::carregar_artigos,
@@ -106,6 +106,24 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 let _ = io::stdout().flush();
             }
+            // Grafo de citações: teclas próprias, as da tabela não valem aqui
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.vista_grafo.is_some() => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => app.grafo_mover(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.grafo_mover(1),
+                KeyCode::Left | KeyCode::Char('h') => app.grafo_coluna(Lado::Cita),
+                KeyCode::Right | KeyCode::Char('l') => app.grafo_coluna(Lado::CitadoPor),
+                KeyCode::Enter => app.grafo_centralizar(),
+                KeyCode::Backspace => app.grafo_voltar(),
+                KeyCode::Char('o') => {
+                    if let Some(i) = app.artigo_grafo() {
+                        let _ = execute!(io::stdout(), DisableMouseCapture);
+                        let _ = io::stdout().flush();
+                        app.abrir_pdf(i, opener);
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('g' | 'q') => app.fechar_grafo(),
+                _ => {}
+            },
             // Pergunta "sobrescrever o .bib?": só s/y confirma, qualquer outra tecla cancela
             Event::Key(key) if key.kind == KeyEventKind::Press && app.confirmar_sobrescrita.is_some() => match key.code {
                 KeyCode::Char('s' | 'S' | 'y' | 'Y') => app.sobrescrever_exportacao(),
@@ -148,6 +166,7 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 match key.code {
                     KeyCode::Esc if !app.filtro.is_empty() => app.limpar_filtro(),
+                    KeyCode::Char('g') => app.abrir_grafo(),
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('/') => app.editando_filtro = true,
                     KeyCode::Char('s') => app.proxima_ordem(),
@@ -192,11 +211,14 @@ fn run_app<B: ratatui::backend::Backend>(
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Up(MouseButton::Left) => {
+                // no grafo a área da tabela não está na tela: clique selecionaria uma linha invisível
+                MouseEventKind::Up(MouseButton::Left) if app.vista_grafo.is_none() => {
                     let _ = execute!(io::stdout(), DisableMouseCapture);
                     let _ = io::stdout().flush();
                     app.lidar_clique_mouse(mouse.column, mouse.row, opener);
                 }
+                MouseEventKind::ScrollDown if app.vista_grafo.is_some() => app.grafo_mover(1),
+                MouseEventKind::ScrollUp if app.vista_grafo.is_some() => app.grafo_mover(-1),
                 MouseEventKind::ScrollDown => app.proximo(),
                 MouseEventKind::ScrollUp => app.anterior(),
                 _ => {}

@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Incrementar sempre que a extração mudar, para descartar resultados antigos.
-const VERSAO: u32 = 1;
+const VERSAO: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Cache {

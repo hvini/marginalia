@@ -45,7 +45,7 @@ pub fn carregar_artigos(dir: &Path, cache: Option<&Path>) -> io::Result<Vec<Arti
         let _ = c.salvar(arquivo);
     }
 
-    artigos.sort_by(|a, b| a.titulo.to_lowercase().cmp(&b.titulo.to_lowercase()));
+    artigos.sort_by_key(|a| a.titulo.to_lowercase());
     Ok(artigos)
 }
 

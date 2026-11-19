@@ -27,6 +27,8 @@ pub struct PdfMetadata {
     pub n_referencias: Option<usize>,
     pub resumo: Option<String>,
     pub palavras_chave: Option<String>, // separadas por "; "
+    /// Seção de referências normalizada (`normalizar_citacao`), para o grafo de citações locais
+    pub referencias: String,
 }
 
 pub fn extrair_metadados(caminho: &Path) -> PdfMetadata {
@@ -108,6 +110,7 @@ fn montar(xmp: &str, info: &Info, linhas: &[Linha], paginas: usize) -> PdfMetada
         arxiv,
         paginas,
         n_referencias: contar_referencias(linhas),
+        referencias: normalizar_citacao(&desifenizar(&secao_referencias(linhas).iter().map(|l| l.texto.as_str()).collect::<Vec<_>>())),
         resumo: extrair_resumo(&pag12),
         palavras_chave,
     }
@@ -170,7 +173,7 @@ fn ler_info(doc: &Document) -> Info {
 fn string_pdf(obj: &Object) -> String {
     let Object::String(bytes, _) = obj else { return String::new() };
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        let w: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let w: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
         return String::from_utf16_lossy(&w).trim().to_string();
     }
     match std::str::from_utf8(bytes) {
@@ -499,10 +502,23 @@ fn normalizar_lista(s: &str) -> String {
 }
 
 /// Conta entradas após o último cabeçalho "References". Tenta numeração [n] / n., depois estilo autor-ano.
+/// Linhas entre o último título "References" e um eventual apêndice; vazio se não houver título
+fn secao_referencias(linhas: &[Linha]) -> Vec<&Linha> {
+    let Some(inicio) = linhas.iter().rposition(|l| RE_HEADING_REFS.is_match(&l.texto)) else { return Vec::new() };
+    linhas[inicio + 1..].iter().take_while(|l| !(RE_FIM_REFS.is_match(&l.texto) && l.texto.len() < 60)).collect()
+}
+
+/// "Deep-Learning: A Survey" → "deep learning a survey": compara títulos e DOIs independentemente do estilo da referência
+pub fn normalizar_citacao(s: &str) -> String {
+    let s: String = s.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect::<String>().to_lowercase();
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn contar_referencias(linhas: &[Linha]) -> Option<usize> {
-    let inicio = linhas.iter().rposition(|l| RE_HEADING_REFS.is_match(&l.texto))? + 1;
-    let secao: Vec<&Linha> = linhas[inicio..].iter()
-        .take_while(|l| !(RE_FIM_REFS.is_match(&l.texto) && l.texto.len() < 60)).collect();
+    let secao = secao_referencias(linhas);
+    if secao.is_empty() {
+        return None;
+    }
 
     // Numeração sequencial é robusta contra números soltos (páginas, volumes) no início de linha
     for re in [&*RE_REF_COLCHETE, &*RE_REF_PONTO] {

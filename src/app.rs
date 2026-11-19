@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, collections::BTreeSet, path::{Path, PathBuf}};
 
 use ratatui::{layout::Rect, widgets::TableState};
-use crate::{anotacoes::{self, Anotacao, Anotacoes}, config::Config, library::Artigo, opener::PdfOpener};
+use crate::{anotacoes::{self, Anotacao, Anotacoes}, config::Config, grafo::Grafo, library::Artigo, opener::PdfOpener};
 
 /// Colunas da tabela, na ordem de exibição; `App::ordem` indexa este array.
 pub const COLUNAS: [&str; 8] = ["Título", "Autores", "Conferência / Journal", "Ano", "Págs", "Refs", "Status", "Tags"];
@@ -38,16 +38,15 @@ pub struct App {
     pub dir_notas: Option<PathBuf>,
     /// Índices em `artigos` que têm nota
     pub com_nota: BTreeSet<usize>,
+    /// Citações entre os artigos locais; refeito quando a biblioteca é recarregada
+    pub grafo: Grafo,
+    /// Grafo centrado em um artigo, mostrado no lugar da tabela
+    pub vista_grafo: Option<VistaGrafo>,
 }
 
 impl App {
     pub fn new(artigos: Vec<Artigo>, config: Config, aviso_config: Option<String>) -> Self {
-        let status_msg = aviso_config.unwrap_or_else(|| {
-            format!(
-                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags | n: nota | r: recarregar",
-                config.nome_viewer_exibicao()
-            )
-        });
+        let status_msg = aviso_config.unwrap_or_else(|| dica(&config));
 
         let mut app = Self {
             artigos,
@@ -71,7 +70,10 @@ impl App {
             editando_tags: None,
             dir_notas: None,
             com_nota: BTreeSet::new(),
+            grafo: Grafo::default(),
+            vista_grafo: None,
         };
+        app.grafo = crate::grafo::construir(&app.artigos);
         app.atualizar_visiveis();
         app
     }
@@ -94,15 +96,14 @@ impl App {
 
     /// Altera a anotação do selecionado e persiste imediatamente
     fn anotar(&mut self, f: impl FnOnce(&mut Anotacao)) {
-        let Some(&i) = self.state.selected().and_then(|s| self.visiveis.get(s)) else { return };
+        let Some(i) = self.indice_selecionado() else { return };
         let artigo = &mut self.artigos[i];
         f(&mut artigo.anotacao);
         self.anotacoes.insert(anotacoes::chave(&artigo.caminho), artigo.anotacao.clone());
-        if let Some(arquivo) = &self.arquivo_anotacoes {
-            if let Err(e) = anotacoes::salvar(arquivo, &self.anotacoes) {
+        if let Some(arquivo) = &self.arquivo_anotacoes
+            && let Err(e) = anotacoes::salvar(arquivo, &self.anotacoes) {
                 self.status_msg = format!("Erro ao salvar anotações: {e}");
             }
-        }
         self.atualizar_visiveis();
     }
 
@@ -130,7 +131,7 @@ impl App {
 
     /// Cria (se preciso) a nota do selecionado e devolve o caminho para abrir no editor
     pub fn preparar_nota(&mut self) -> Option<PathBuf> {
-        let i = *self.state.selected().and_then(|s| self.visiveis.get(s))?;
+        let i = self.indice_selecionado()?;
         let dir = self.dir_notas.as_ref()?;
         match crate::notas::garantir(dir, &self.artigos[i]) {
             Ok(nota) => {
@@ -144,13 +145,93 @@ impl App {
         }
     }
 
+    /// Abre o grafo centrado no selecionado; sem citações locais não abre (tela vazia seria beco sem saída)
+    pub fn abrir_grafo(&mut self) {
+        let Some(i) = self.indice_selecionado() else { return };
+        if self.grafo.conectado(i) {
+            self.vista_grafo = Some(VistaGrafo::new(i, &self.grafo));
+            self.status_msg = "Grafo de citações entre os PDFs da biblioteca".into();
+        } else {
+            // título no fim: se não couber, a barra de status corta o título e não a mensagem
+            self.status_msg = format!("Nenhuma citação com outros PDFs da biblioteca: {}", self.artigos[i].titulo);
+        }
+    }
+
+    /// Fecha o grafo deixando selecionado na tabela o artigo que estava em destaque
+    pub fn fechar_grafo(&mut self) {
+        if let Some(pos) = self.artigo_grafo().and_then(|i| self.visiveis.iter().position(|&v| v == i)) {
+            self.state.select(Some(pos));
+        }
+        self.vista_grafo = None;
+        self.status_msg = dica(&self.config);
+    }
+
+    /// Artigos de uma coluna do grafo em foco, do mais antigo ao mais recente (sem ano por último)
+    pub fn coluna_grafo(&self, lado: Lado) -> Vec<usize> {
+        let Some(v) = &self.vista_grafo else { return Vec::new() };
+        let mut ids = match lado {
+            Lado::Cita => self.grafo.cita[v.foco].clone(),
+            Lado::CitadoPor => self.grafo.citado_por[v.foco].clone(),
+        };
+        ids.sort_by_key(|&i| (ano(&self.artigos[i]).unwrap_or(i32::MAX), self.artigos[i].titulo.to_lowercase()));
+        ids
+    }
+
+    /// Artigo sob o cursor do grafo (ou o foco, se a coluna estiver vazia)
+    pub fn artigo_grafo(&self) -> Option<usize> {
+        let v = self.vista_grafo.as_ref()?;
+        Some(self.coluna_grafo(v.lado).get(v.linha).copied().unwrap_or(v.foco))
+    }
+
+    /// Move o cursor dentro da coluna, de forma circular
+    pub fn grafo_mover(&mut self, passo: isize) {
+        let Some(lado) = self.vista_grafo.as_ref().map(|v| v.lado) else { return };
+        let n = self.coluna_grafo(lado).len() as isize;
+        if let Some(v) = self.vista_grafo.as_mut().filter(|_| n > 0) {
+            v.linha = (v.linha as isize + passo).rem_euclid(n) as usize;
+        }
+    }
+
+    /// Passa o cursor para a outra coluna, se ela tiver artigos
+    pub fn grafo_coluna(&mut self, lado: Lado) {
+        let n = self.coluna_grafo(lado).len();
+        if let Some(v) = self.vista_grafo.as_mut().filter(|_| n > 0) {
+            v.lado = lado;
+            v.linha = v.linha.min(n - 1);
+        }
+    }
+
+    /// Recentraliza no artigo sob o cursor, guardando o foco atual para `grafo_voltar`
+    pub fn grafo_centralizar(&mut self) {
+        let Some(i) = self.artigo_grafo() else { return };
+        if let Some(v) = self.vista_grafo.as_mut().filter(|v| v.foco != i) {
+            let mut historico = std::mem::take(&mut v.historico);
+            historico.push(v.foco);
+            *v = VistaGrafo { historico, ..VistaGrafo::new(i, &self.grafo) };
+        }
+    }
+
+    pub fn grafo_voltar(&mut self) {
+        if let Some(v) = self.vista_grafo.as_mut()
+            && let Some(anterior) = v.historico.pop()
+        {
+            let historico = std::mem::take(&mut v.historico);
+            *v = VistaGrafo { historico, ..VistaGrafo::new(anterior, &self.grafo) };
+        }
+    }
+
     pub fn selecionado(&self) -> Option<&Artigo> {
-        self.state.selected().and_then(|i| self.visiveis.get(i)).map(|&i| &self.artigos[i])
+        self.indice_selecionado().map(|i| &self.artigos[i])
+    }
+
+    /// Índice em `artigos` da linha selecionada na tabela
+    pub fn indice_selecionado(&self) -> Option<usize> {
+        self.state.selected().and_then(|s| self.visiveis.get(s)).copied()
     }
 
     /// Reaplica filtro e ordenação, mantendo selecionado o mesmo artigo se ele continuar visível.
     pub fn atualizar_visiveis(&mut self) {
-        let anterior = self.state.selected().and_then(|i| self.visiveis.get(i)).copied();
+        let anterior = self.indice_selecionado();
         let termos: Vec<String> = self.filtro.to_lowercase().split_whitespace().map(String::from).collect();
 
         self.visiveis = (0..self.artigos.len())
@@ -166,7 +247,7 @@ impl App {
 
     /// Marca/desmarca o artigo selecionado e desce para o próximo
     pub fn alternar_marca(&mut self) {
-        let Some(&i) = self.state.selected().and_then(|s| self.visiveis.get(s)) else { return };
+        let Some(i) = self.indice_selecionado() else { return };
         if !self.marcados.remove(&i) {
             self.marcados.insert(i);
         }
@@ -225,6 +306,7 @@ impl App {
         let marcados: std::collections::HashSet<PathBuf> = self.marcados.iter().map(|&i| self.artigos[i].caminho.clone()).collect();
         let selecionado = self.selecionado().map(|a| a.caminho.clone());
         self.artigos = artigos;
+        self.grafo = crate::grafo::construir(&self.artigos);
         for a in &mut self.artigos {
             a.anotacao = self.anotacoes.get(&anotacoes::chave(&a.caminho)).cloned().unwrap_or_default();
         }
@@ -312,7 +394,13 @@ impl App {
     }
 
     pub fn abrir_selecionado(&mut self, opener: &dyn PdfOpener) {
-        if let Some(artigo) = self.selecionado() {
+        if let Some(i) = self.indice_selecionado() {
+            self.abrir_pdf(i, opener);
+        }
+    }
+
+    pub fn abrir_pdf(&mut self, i: usize, opener: &dyn PdfOpener) {
+        if let Some(artigo) = self.artigos.get(i) {
             self.status_msg = match opener.open(&artigo.caminho, &self.config) {
                 Ok(viewer) => format!("Abrindo '{}' com {}", artigo.titulo, viewer),
                 Err(e) => format!("Erro ao abrir {}: {}", artigo.titulo, e),
@@ -342,6 +430,41 @@ impl App {
 
 /// Termo do filtro (já em minúsculas): `tag:x` e `status:x` comparam por prefixo só naquele campo
 /// (prefixo para a lista reagir enquanto se digita); os demais procuram em todos os campos.
+/// Atalhos da tabela, mostrados na barra de status
+fn dica(config: &Config) -> String {
+    format!(
+        "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags | n: nota | g: grafo | r: recarregar",
+        config.nome_viewer_exibicao()
+    )
+}
+
+/// Coluna do grafo: à esquerda o que o foco cita, à direita quem cita o foco
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lado {
+    Cita,
+    CitadoPor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VistaGrafo {
+    pub foco: usize,
+    pub lado: Lado,
+    pub linha: usize,
+    /// Focos anteriores, para voltar com Backspace
+    pub historico: Vec<usize>,
+}
+
+impl VistaGrafo {
+    fn new(foco: usize, g: &Grafo) -> Self {
+        let lado = if g.cita[foco].is_empty() { Lado::CitadoPor } else { Lado::Cita };
+        VistaGrafo { foco, lado, linha: 0, historico: Vec::new() }
+    }
+}
+
+pub fn ano(a: &Artigo) -> Option<i32> {
+    a.meta.ano.as_deref()?.parse().ok()
+}
+
 fn passa(a: &Artigo, termo: &str) -> bool {
     if let Some(v) = termo.strip_prefix("tag:") {
         return a.anotacao.tags.iter().any(|t| t.to_lowercase().starts_with(v));
@@ -589,6 +712,49 @@ mod tests {
         app.sobrescrever_exportacao();
         assert!(app.status_msg.starts_with("1 referências exportadas"));
         assert_eq!(std::fs::read_to_string(&destino).unwrap().matches("@misc{").count(), 1);
+    }
+
+    #[test]
+    fn grafo_centrado_no_selecionado_navega_recentraliza_e_volta() {
+        let mut artigos = vec![
+            artigo_com("A antigo", "/tmp/a.pdf", Some("2010"), None),
+            artigo_com("B meio", "/tmp/b.pdf", Some("2015"), None),
+            artigo_com("C recente", "/tmp/c.pdf", Some("2020"), None),
+            artigo_com("D isolado", "/tmp/d.pdf", Some("2021"), None),
+        ];
+        for (a, t) in artigos.iter_mut().zip(["Antigo trabalho sobre hipocampo", "Meio trabalho sobre ventrículos", "x", "y"]) {
+            a.meta.titulo = Some(t.into());
+        }
+        artigos[1].meta.referencias = "antigo trabalho sobre hipocampo".into(); // B cita A
+        artigos[2].meta.referencias = "meio trabalho sobre ventrículos antigo trabalho sobre hipocampo".into(); // C cita B e A
+        let mut app = App::new(artigos, Config::default(), None);
+
+        app.state.select(Some(3)); // D: sem citações, não abre
+        app.abrir_grafo();
+        assert!(app.vista_grafo.is_none() && app.status_msg.starts_with("Nenhuma citação"));
+
+        app.state.select(Some(1)); // B
+        app.abrir_grafo();
+        assert_eq!(app.coluna_grafo(Lado::Cita), [0]);
+        assert_eq!(app.coluna_grafo(Lado::CitadoPor), [2]);
+        assert_eq!(app.artigo_grafo(), Some(0)); // cursor começa no que o foco cita
+        app.grafo_coluna(Lado::CitadoPor);
+        assert_eq!(app.artigo_grafo(), Some(2));
+
+        app.grafo_centralizar(); // foco = C, que cita A e B (ordem de ano)
+        assert_eq!(app.vista_grafo.as_ref().unwrap().foco, 2);
+        assert_eq!(app.coluna_grafo(Lado::Cita), [0, 1]);
+        app.grafo_mover(1);
+        app.grafo_mover(1);
+        assert_eq!(app.artigo_grafo(), Some(0), "circular");
+        app.grafo_coluna(Lado::CitadoPor); // vazia: cursor fica onde está
+        assert_eq!(app.artigo_grafo(), Some(0));
+
+        app.grafo_voltar();
+        assert_eq!(app.vista_grafo.as_ref().unwrap().foco, 1);
+        app.fechar_grafo();
+        assert!(app.vista_grafo.is_none());
+        assert_eq!(app.selecionado().unwrap().titulo, "A antigo");
     }
 
     #[test]
