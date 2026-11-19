@@ -1,4 +1,4 @@
-use crate::metadata::PdfMetadata;
+use crate::{cache::Cache, metadata::PdfMetadata};
 use std::{fs, io, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,7 +10,9 @@ pub struct Artigo {
     pub tamanho_kb: u64,
 }
 
-pub fn carregar_artigos(dir: &Path) -> io::Result<Vec<Artigo>> {
+/// `cache`: arquivo do cache de metadados; `None` extrai tudo sem cache.
+pub fn carregar_artigos(dir: &Path, cache: Option<&Path>) -> io::Result<Vec<Artigo>> {
+    let mut memo = cache.map(Cache::carregar);
     let mut artigos = Vec::new();
 
     if dir.is_dir() {
@@ -26,12 +28,20 @@ pub fn carregar_artigos(dir: &Path) -> io::Result<Vec<Artigo>> {
                     .to_string();
 
                 let tamanho_kb = fs::metadata(&path)?.len() / 1024;
-                let meta = crate::metadata::extrair_metadados(&path);
+                let meta = match memo.as_mut() {
+                    Some(c) => c.metadados(&path),
+                    None => crate::metadata::extrair_metadados(&path),
+                };
 
                 let titulo = meta.titulo.clone().unwrap_or_else(|| nome.clone());
                 artigos.push(Artigo { titulo, nome_arquivo: nome, meta, caminho: path, tamanho_kb });
             }
         }
+    }
+
+    if let (Some(c), Some(arquivo)) = (memo.as_mut(), cache) {
+        // falha ao gravar o cache só custa reextrair na próxima vez; não impede abrir a biblioteca
+        let _ = c.salvar(arquivo);
     }
 
     artigos.sort_by(|a, b| a.titulo.to_lowercase().cmp(&b.titulo.to_lowercase()));
@@ -56,7 +66,7 @@ mod tests {
         File::create(dir.path().join("notas.txt")).unwrap();
         File::create(dir.path().join("imagem.png")).unwrap();
 
-        let artigos = carregar_artigos(dir.path()).unwrap();
+        let artigos = carregar_artigos(dir.path(), None).unwrap();
 
         assert_eq!(artigos.len(), 2);
         assert_eq!(artigos[0].titulo, "Algoritmo");

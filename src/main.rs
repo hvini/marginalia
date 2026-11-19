@@ -16,6 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use marginalia::{
     app::App,
+    cache::Cache,
     config::Config,
     library::carregar_artigos,
     opener::{PdfOpener, SystemOpener},
@@ -30,7 +31,7 @@ fn main() -> io::Result<()> {
         PathBuf::from(".")
     };
 
-    let artigos = carregar_artigos(&dir_path)?;
+    let artigos = carregar_artigos(&dir_path, Cache::caminho_padrao().as_deref())?;
     let (config, aviso_config) = Config::carregar_ou_criar();
     let opener = SystemOpener;
 

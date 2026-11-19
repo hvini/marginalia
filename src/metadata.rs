@@ -12,7 +12,8 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PdfMetadata {
     pub titulo: Option<String>,
     pub autores: Option<String>, // separados por "; "
