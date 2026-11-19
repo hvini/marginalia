@@ -82,10 +82,24 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 let _ = io::stdout().flush();
             }
+            // Modo de digitação do filtro: as teclas viram texto, não comandos
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.editando_filtro => match key.code {
+                KeyCode::Enter => app.editando_filtro = false,
+                KeyCode::Esc => app.limpar_filtro(),
+                KeyCode::Backspace => app.apagar_filtro(),
+                KeyCode::Down => app.proximo(),
+                KeyCode::Up => app.anterior(),
+                KeyCode::Char(c) => app.digitar_filtro(c),
+                _ => {}
+            },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 match key.code {
+                    KeyCode::Esc if !app.filtro.is_empty() => app.limpar_filtro(),
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('/') => app.editando_filtro = true,
+                    KeyCode::Char('s') => app.proxima_ordem(),
+                    KeyCode::Char('S') => app.inverter_ordem(),
                     KeyCode::Down | KeyCode::Char('j') => app.proximo(),
                     KeyCode::Up | KeyCode::Char('k') => app.anterior(),
                     KeyCode::Enter => {

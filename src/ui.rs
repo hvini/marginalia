@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{app::App, library::Artigo};
+use crate::{app::{App, COLUNAS}, library::Artigo};
 
 const SIMBOLO_SELECAO: &str = "▶ ";
 
@@ -23,10 +23,14 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     render_tabela(f, app, area_tabela);
     if altura_detalhes > 0 {
-        let selecionado = app.state.selected().and_then(|i| app.artigos.get(i));
-        render_detalhes(f, selecionado, area_detalhes);
+        render_detalhes(f, app.selecionado(), area_detalhes);
     }
-    f.render_widget(Paragraph::new(format!(" {}", app.status_msg)).fg(Color::Gray).bg(Color::DarkGray), area_status);
+    let status = if app.editando_filtro {
+        Paragraph::new(format!(" Filtrar: {}█   (Enter confirma, Esc limpa)", app.filtro)).fg(Color::Black).bg(Color::Yellow)
+    } else {
+        Paragraph::new(format!(" {}", app.status_msg)).fg(Color::Gray).bg(Color::DarkGray)
+    };
+    f.render_widget(status, area_status);
 }
 
 fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
@@ -34,18 +38,20 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Fill(5), // Título
         Constraint::Fill(2), // Autores
         Constraint::Fill(3), // Venue
-        Constraint::Length(4), // Ano
-        Constraint::Length(4), // Págs
-        Constraint::Length(4), // Refs
+        Constraint::Length(6), // Ano
+        Constraint::Length(6), // Págs
+        Constraint::Length(6), // Refs
     ];
     // Mesmas colunas que a Table vai calcular, para cortar o texto com reticências
     let interno = Rect { width: area.width.saturating_sub(2 + SIMBOLO_SELECAO.chars().count() as u16), ..area };
     let colunas: Vec<usize> = Layout::horizontal(larguras).spacing(1).split(interno).iter().map(|r| r.width as usize).collect();
 
-    let header = Row::new(["Título", "Autores", "Conferência / Journal", "Ano", "Págs", "Refs"])
+    let seta = if app.decrescente { " ▼" } else { " ▲" };
+    let header = Row::new(COLUNAS.iter().enumerate().map(|(i, c)| if i == app.ordem { format!("{c}{seta}") } else { c.to_string() }))
         .style(Style::default().fg(Color::Yellow).bold());
 
-    let rows = app.artigos.iter().map(|a| {
+    let rows = app.visiveis.iter().map(|&i| {
+        let a = &app.artigos[i];
         let m = &a.meta;
         let celulas = [
             a.titulo.clone(),
@@ -61,12 +67,20 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, larguras)
         .header(header)
         .column_spacing(1)
-        .block(Block::default().borders(Borders::ALL).title(format!(" Biblioteca de Artigos ({} PDFs) ", app.artigos.len())))
+        .block(Block::default().borders(Borders::ALL).title(titulo_tabela(app)))
         .row_highlight_style(Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
         .highlight_symbol(SIMBOLO_SELECAO)
         .highlight_spacing(HighlightSpacing::Always);
 
     f.render_stateful_widget(table, area, &mut app.state);
+}
+
+fn titulo_tabela(app: &App) -> String {
+    if app.filtro.is_empty() {
+        format!(" Biblioteca de Artigos ({} PDFs) ", app.artigos.len())
+    } else {
+        format!(" Biblioteca de Artigos ({} de {} PDFs) · filtro: \"{}\" ", app.visiveis.len(), app.artigos.len(), app.filtro)
+    }
 }
 
 fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {
@@ -176,6 +190,18 @@ mod tests {
         assert!(conteudo.contains("Pierrick Coupé; José V. Manjon; Boris Mansencal"));
         assert!(conteudo.contains("DOI 10.1002/hbm.25850"));
         assert!(conteudo.contains("35 referências"));
+    }
+
+    #[test]
+    fn mostra_filtro_e_coluna_ordenada() {
+        let mut app = app_exemplo();
+        app.inverter_ordem();
+        app.editando_filtro = true;
+        app.digitar_filtro('x');
+        let conteudo = tela(&mut app, 100, 30);
+        assert!(conteudo.contains("Título ▼"));
+        assert!(conteudo.contains("(0 de 1 PDFs)"));
+        assert!(conteudo.contains("Filtrar: x"));
     }
 
     #[test]
