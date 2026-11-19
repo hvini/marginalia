@@ -3,10 +3,16 @@
 use crate::library::Artigo;
 use std::{collections::HashSet, fs::OpenOptions, io::{self, Write}, path::Path};
 
-/// Grava as entradas em `destino`. Recusa sobrescrever um arquivo existente (pode ter sido editado à mão).
-pub fn exportar(artigos: &[&Artigo], destino: &Path) -> io::Result<()> {
-    let mut f = OpenOptions::new().write(true).create_new(true).open(destino)?;
-    f.write_all(gerar(artigos).as_bytes())
+/// Grava as entradas em `destino`. Sem `sobrescrever`, recusa um arquivo existente (pode ter sido editado à mão);
+/// com ele, troca o arquivo de forma atômica (temporário + rename), sem deixá-lo pela metade.
+pub fn exportar(artigos: &[&Artigo], destino: &Path, sobrescrever: bool) -> io::Result<()> {
+    if !sobrescrever {
+        let mut f = OpenOptions::new().write(true).create_new(true).open(destino)?;
+        return f.write_all(gerar(artigos).as_bytes());
+    }
+    let tmp = destino.with_extension("bib.tmp");
+    std::fs::write(&tmp, gerar(artigos))?;
+    std::fs::rename(tmp, destino)
 }
 
 pub fn gerar(artigos: &[&Artigo]) -> String {
@@ -135,7 +141,10 @@ mod tests {
         let destino = dir.path().join("refs.bib");
         std::fs::write(&destino, "editado à mão").unwrap();
         let a = artigo("Titulo Qualquer", PdfMetadata::default());
-        assert_eq!(exportar(&[&a], &destino).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(exportar(&[&a], &destino, false).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&destino).unwrap(), "editado à mão");
+        exportar(&[&a], &destino, true).unwrap();
+        assert!(std::fs::read_to_string(&destino).unwrap().starts_with("@misc{"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1); // sem .tmp sobrando
     }
 }

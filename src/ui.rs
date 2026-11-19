@@ -29,6 +29,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     let status = if let Some(tags) = &app.editando_tags {
         Paragraph::new(format!(" Tags (separadas por vírgula): {tags}█   (Enter salva, Esc cancela)")).fg(Color::Black).bg(Color::Cyan)
+    } else if let Some(destino) = &app.confirmar_sobrescrita {
+        Paragraph::new(format!(" {destino} já existe. Sobrescrever? (s/N)")).fg(Color::White).bg(Color::Red)
     } else if let Some(destino) = &app.destino_bib {
         let n = app.alvos_exportacao(app.exportar_tudo).len();
         Paragraph::new(format!(" Exportar {n} artigos para: {destino}█   (Enter grava, Esc cancela)")).fg(Color::Black).bg(Color::Green)

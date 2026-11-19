@@ -23,6 +23,8 @@ pub struct App {
     /// `Some(caminho)` enquanto o usuário edita o destino do .bib
     pub destino_bib: Option<String>,
     pub exportar_tudo: bool,
+    /// Destino do .bib que já existe, aguardando confirmação para sobrescrever
+    pub confirmar_sobrescrita: Option<String>,
     pub destino_padrao: String,
     /// Mantido vivo enquanto o app roda: no X11 o conteúdo copiado pertence a este processo
     area_transferencia: Option<arboard::Clipboard>,
@@ -42,7 +44,7 @@ impl App {
     pub fn new(artigos: Vec<Artigo>, config: Config, aviso_config: Option<String>) -> Self {
         let status_msg = aviso_config.unwrap_or_else(|| {
             format!(
-                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags | n: nota",
+                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags | n: nota | r: recarregar",
                 config.nome_viewer_exibicao()
             )
         });
@@ -61,6 +63,7 @@ impl App {
             marcados: BTreeSet::new(),
             destino_bib: None,
             exportar_tudo: false,
+            confirmar_sobrescrita: None,
             destino_padrao: "referencias.bib".into(),
             area_transferencia: None,
             anotacoes: Anotacoes::new(),
@@ -187,17 +190,53 @@ impl App {
     }
 
     pub fn confirmar_exportacao(&mut self) {
-        let Some(destino) = self.destino_bib.take() else { return };
+        if let Some(destino) = self.destino_bib.take() {
+            self.gravar_bib(destino, false);
+        }
+    }
+
+    /// Resposta "sim" à pergunta de sobrescrever
+    pub fn sobrescrever_exportacao(&mut self) {
+        if let Some(destino) = self.confirmar_sobrescrita.take() {
+            self.gravar_bib(destino, true);
+        }
+    }
+
+    fn gravar_bib(&mut self, destino: String, sobrescrever: bool) {
         let alvos = self.alvos_exportacao(self.exportar_tudo);
-        self.status_msg = if alvos.is_empty() {
-            "Nada para exportar".into()
-        } else {
-            match crate::bibtex::exportar(&alvos, Path::new(&destino)) {
-                Ok(()) => format!("{} referências exportadas para {destino}", alvos.len()),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => format!("{destino} já existe; escolha outro nome (e)"),
-                Err(e) => format!("Erro ao exportar para {destino}: {e}"),
+        if alvos.is_empty() {
+            self.status_msg = "Nada para exportar".into();
+            return;
+        }
+        let n = alvos.len();
+        match crate::bibtex::exportar(&alvos, Path::new(&destino), sobrescrever) {
+            Ok(()) => {
+                self.status_msg = format!("{n} referências exportadas para {destino}");
+                // a próxima exportação já sugere o mesmo arquivo (fluxo típico: regenerar o .bib do LaTeX)
+                self.destino_padrao = destino;
             }
-        };
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => self.confirmar_sobrescrita = Some(destino),
+            Err(e) => self.status_msg = format!("Erro ao exportar para {destino}: {e}"),
+        }
+    }
+
+    /// Troca a lista de artigos (biblioteca relida do disco), preservando marcas e seleção pelo caminho do PDF
+    pub fn recarregar_artigos(&mut self, artigos: Vec<Artigo>) {
+        let marcados: std::collections::HashSet<PathBuf> = self.marcados.iter().map(|&i| self.artigos[i].caminho.clone()).collect();
+        let selecionado = self.selecionado().map(|a| a.caminho.clone());
+        self.artigos = artigos;
+        for a in &mut self.artigos {
+            a.anotacao = self.anotacoes.get(&anotacoes::chave(&a.caminho)).cloned().unwrap_or_default();
+        }
+        self.marcados = (0..self.artigos.len()).filter(|&i| marcados.contains(&self.artigos[i].caminho)).collect();
+        if let Some(dir) = self.dir_notas.clone() {
+            self.definir_dir_notas(dir);
+        }
+        self.state.select(None);
+        self.atualizar_visiveis();
+        if let Some(pos) = selecionado.and_then(|c| self.visiveis.iter().position(|&i| self.artigos[i].caminho == c)) {
+            self.state.select(Some(pos));
+        }
     }
 
     /// Copia o BibTeX dos mesmos alvos da exportação (`tudo` como em `E`)
@@ -541,9 +580,28 @@ mod tests {
         app.confirmar_exportacao();
         assert!(app.status_msg.starts_with("3 referências exportadas"));
         assert_eq!(std::fs::read_to_string(&destino).unwrap().matches("@misc{").count(), 3);
+        std::fs::write(&destino, "editado").unwrap();
+        app.marcados.insert(0);
         app.iniciar_exportacao(false);
         app.confirmar_exportacao();
-        assert!(app.status_msg.contains("já existe"));
+        assert_eq!(app.confirmar_sobrescrita.as_deref(), Some(app.destino_padrao.as_str()));
+        assert_eq!(std::fs::read_to_string(&destino).unwrap(), "editado");
+        app.sobrescrever_exportacao();
+        assert!(app.status_msg.starts_with("1 referências exportadas"));
+        assert_eq!(std::fs::read_to_string(&destino).unwrap().matches("@misc{").count(), 1);
+    }
+
+    #[test]
+    fn recarregar_mantem_marcas_selecao_e_anotacoes_pelo_caminho() {
+        let mut app = App::new(criar_artigos_exemplo(), Config::default(), None);
+        app.state.select(Some(2)); // Artigo 3
+        app.marcados.insert(1); // Artigo 2
+        app.anotacoes.insert("2.pdf".into(), Anotacao { status: anotacoes::Status::Lido, tags: vec![] });
+        // Artigo 1 saiu, Artigo 0 entrou: os índices mudam
+        app.recarregar_artigos(vec![artigo_teste("Artigo 0", "/tmp/0.pdf"), artigo_teste("Artigo 2", "/tmp/2.pdf"), artigo_teste("Artigo 3", "/tmp/3.pdf")]);
+        assert_eq!(app.selecionado().unwrap().titulo, "Artigo 3");
+        assert_eq!(app.alvos_exportacao(false).iter().map(|a| a.titulo.as_str()).collect::<Vec<_>>(), ["Artigo 2"]);
+        assert_eq!(app.artigos[1].anotacao.status, anotacoes::Status::Lido);
     }
 
     #[test]

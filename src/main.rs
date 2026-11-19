@@ -50,7 +50,7 @@ fn main() -> io::Result<()> {
     app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
     app.carregar_anotacoes(dir_path.join(marginalia::anotacoes::NOME_ARQUIVO));
     app.definir_dir_notas(dir_path.join(marginalia::notas::PASTA));
-    let res = run_app(&mut terminal, &mut app, &opener);
+    let res = run_app(&mut terminal, &mut app, &opener, &dir_path);
 
     disable_raw_mode()?;
     execute!(
@@ -92,6 +92,7 @@ fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     opener: &dyn PdfOpener,
+    dir: &std::path::Path,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -105,6 +106,14 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 let _ = io::stdout().flush();
             }
+            // Pergunta "sobrescrever o .bib?": só s/y confirma, qualquer outra tecla cancela
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.confirmar_sobrescrita.is_some() => match key.code {
+                KeyCode::Char('s' | 'S' | 'y' | 'Y') => app.sobrescrever_exportacao(),
+                _ => {
+                    app.confirmar_sobrescrita = None;
+                    app.status_msg = "Exportação cancelada".into();
+                }
+            },
             // Digitação das tags do selecionado
             Event::Key(key) if key.kind == KeyEventKind::Press && app.editando_tags.is_some() => match key.code {
                 KeyCode::Enter => app.confirmar_tags(),
@@ -169,12 +178,15 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('r') => {
                         let (nova_config, aviso) = Config::carregar_ou_criar();
                         app.config = nova_config;
-                        app.status_msg = aviso.unwrap_or_else(|| {
-                            format!(
-                                "Config recarregada! Viewer: {}",
-                                app.config.nome_viewer_exibicao()
-                            )
-                        });
+                        // PDFs novos são extraídos; os já conhecidos vêm do cache
+                        app.status_msg = match carregar_artigos(dir, Cache::caminho_padrao().as_deref()) {
+                            Err(e) => format!("Erro ao reler a biblioteca: {e}"),
+                            Ok(artigos) => {
+                                let n = artigos.len();
+                                app.recarregar_artigos(artigos);
+                                aviso.unwrap_or_else(|| format!("Recarregado: {n} artigos | Viewer: {}", app.config.nome_viewer_exibicao()))
+                            }
+                        };
                     }
                     _ => {}
                 }
