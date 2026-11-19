@@ -25,7 +25,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if altura_detalhes > 0 {
         render_detalhes(f, app.selecionado(), area_detalhes);
     }
-    let status = if app.editando_filtro {
+    let status = if let Some(destino) = &app.destino_bib {
+        let n = app.alvos_exportacao(app.exportar_tudo).len();
+        Paragraph::new(format!(" Exportar {n} artigos para: {destino}█   (Enter grava, Esc cancela)")).fg(Color::Black).bg(Color::Green)
+    } else if app.editando_filtro {
         Paragraph::new(format!(" Filtrar: {}█   (Enter confirma, Esc limpa)", app.filtro)).fg(Color::Black).bg(Color::Yellow)
     } else {
         Paragraph::new(format!(" {}", app.status_msg)).fg(Color::Gray).bg(Color::DarkGray)
@@ -53,8 +56,9 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.visiveis.iter().map(|&i| {
         let a = &app.artigos[i];
         let m = &a.meta;
+        let marca = if app.marcados.contains(&i) { "● " } else { "" };
         let celulas = [
-            a.titulo.clone(),
+            format!("{marca}{}", a.titulo),
             autores_curto(m.autores.as_deref()),
             m.venue.clone().unwrap_or_else(|| "—".into()),
             m.ano.clone().unwrap_or_else(|| "—".into()),
@@ -76,11 +80,15 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn titulo_tabela(app: &App) -> String {
-    if app.filtro.is_empty() {
+    let mut t = if app.filtro.is_empty() {
         format!(" Biblioteca de Artigos ({} PDFs) ", app.artigos.len())
     } else {
         format!(" Biblioteca de Artigos ({} de {} PDFs) · filtro: \"{}\" ", app.visiveis.len(), app.artigos.len(), app.filtro)
+    };
+    if !app.marcados.is_empty() {
+        t.push_str(&format!("· {} marcados ", app.marcados.len()));
     }
+    t
 }
 
 fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {

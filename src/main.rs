@@ -47,6 +47,7 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(artigos, config, aviso_config);
+    app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
     let res = run_app(&mut terminal, &mut app, &opener);
 
     disable_raw_mode()?;
@@ -82,6 +83,16 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 let _ = io::stdout().flush();
             }
+            // Digitação do caminho do .bib
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.destino_bib.is_some() => match key.code {
+                KeyCode::Enter => app.confirmar_exportacao(),
+                KeyCode::Esc => app.destino_bib = None,
+                KeyCode::Backspace => {
+                    app.destino_bib.as_mut().map(String::pop);
+                }
+                KeyCode::Char(c) => app.destino_bib.as_mut().into_iter().for_each(|d| d.push(c)),
+                _ => {}
+            },
             // Modo de digitação do filtro: as teclas viram texto, não comandos
             Event::Key(key) if key.kind == KeyEventKind::Press && app.editando_filtro => match key.code {
                 KeyCode::Enter => app.editando_filtro = false,
@@ -100,6 +111,11 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('/') => app.editando_filtro = true,
                     KeyCode::Char('s') => app.proxima_ordem(),
                     KeyCode::Char('S') => app.inverter_ordem(),
+                    KeyCode::Char(' ') => app.alternar_marca(),
+                    KeyCode::Char('e') => app.iniciar_exportacao(false),
+                    KeyCode::Char('E') => app.iniciar_exportacao(true),
+                    KeyCode::Char('y') => app.copiar_bibtex(false),
+                    KeyCode::Char('Y') => app.copiar_bibtex(true),
                     KeyCode::Down | KeyCode::Char('j') => app.proximo(),
                     KeyCode::Up | KeyCode::Char('k') => app.anterior(),
                     KeyCode::Enter => {

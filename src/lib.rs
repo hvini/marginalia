@@ -1,4 +1,5 @@
 pub mod app;
+pub mod bibtex;
 pub mod cache;
 pub mod config;
 pub mod library;
