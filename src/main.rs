@@ -49,6 +49,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new(artigos, config, aviso_config);
     app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
     app.carregar_anotacoes(dir_path.join(marginalia::anotacoes::NOME_ARQUIVO));
+    app.definir_dir_notas(dir_path.join(marginalia::notas::PASTA));
     let res = run_app(&mut terminal, &mut app, &opener);
 
     disable_raw_mode()?;
@@ -65,6 +66,26 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Suspende a TUI, roda o editor no terminal e restaura a TUI ao voltar
+fn editar_nota<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    config: &Config,
+    nota: &std::path::Path,
+) -> io::Result<String> {
+    let (programa, args) = config.comando_editor();
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    let resultado = std::process::Command::new(&programa).args(&args).arg(nota).status();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+    Ok(match resultado {
+        Ok(s) if s.success() => format!("Nota salva: {}", nota.display()),
+        Ok(s) => format!("{programa} terminou com {s}; nota em {}", nota.display()),
+        Err(e) => format!("Não foi possível abrir o editor '{programa}': {e} (ajuste 'editor' no config.toml)"),
+    })
 }
 
 fn run_app<B: ratatui::backend::Backend>(
@@ -127,6 +148,15 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('E') => app.iniciar_exportacao(true),
                     KeyCode::Char('l') => app.alternar_status(),
                     KeyCode::Char('t') => app.iniciar_edicao_tags(),
+                    KeyCode::Char('n') => {
+                        if let Some(nota) = app.preparar_nota() {
+                            app.status_msg = editar_nota(terminal, &app.config, &nota)?;
+                            // o usuário pode ter apagado o arquivo no editor
+                            if let Some(dir) = app.dir_notas.clone() {
+                                app.definir_dir_notas(dir);
+                            }
+                        }
+                    }
                     KeyCode::Char('y') => app.copiar_bibtex(false),
                     KeyCode::Char('Y') => app.copiar_bibtex(true),
                     KeyCode::Down | KeyCode::Char('j') => app.proximo(),

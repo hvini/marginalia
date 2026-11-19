@@ -23,7 +23,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     render_tabela(f, app, area_tabela);
     if altura_detalhes > 0 {
-        render_detalhes(f, app.selecionado(), area_detalhes);
+        let nota = app.state.selected().and_then(|s| app.visiveis.get(s)).filter(|i| app.com_nota.contains(i))
+            .zip(app.dir_notas.as_ref()).map(|(&i, dir)| crate::notas::caminho(dir, &app.artigos[i]));
+        render_detalhes(f, app.selecionado(), nota, area_detalhes);
     }
     let status = if let Some(tags) = &app.editando_tags {
         Paragraph::new(format!(" Tags (separadas por vírgula): {tags}█   (Enter salva, Esc cancela)")).fg(Color::Black).bg(Color::Cyan)
@@ -63,8 +65,9 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
         let a = &app.artigos[i];
         let m = &a.meta;
         let marca = if app.marcados.contains(&i) { "● " } else { "" };
+        let nota = if app.com_nota.contains(&i) { "✎ " } else { "" };
         let celulas = [
-            format!("{marca}{}", a.titulo),
+            format!("{marca}{nota}{}", a.titulo),
             autores_curto(m.autores.as_deref()),
             m.venue.clone().unwrap_or_else(|| "—".into()),
             m.ano.clone().unwrap_or_else(|| "—".into()),
@@ -107,7 +110,7 @@ fn titulo_tabela(app: &App) -> String {
     t
 }
 
-fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {
+fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, nota: Option<std::path::PathBuf>, area: Rect) {
     let bloco = Block::default().borders(Borders::ALL).title(" Detalhes ");
     let Some(a) = artigo else {
         f.render_widget(Paragraph::new("Nenhum artigo selecionado").block(bloco), area);
@@ -133,16 +136,18 @@ fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {
 
     let mut linhas = vec![Line::from(a.titulo.clone()).bold()];
     linhas.extend([
-        campo("Autores: ", m.autores.clone()),
-        campo("Publicação: ", juntar(&publicacao)),
-        juntar(&identificadores).map(|t| Line::from(t).fg(Color::Gray)),
-        campo("Palavras-chave: ", m.palavras_chave.clone()),
         Some(Line::from(vec![
             rotulo("Status: "),
             Span::raw(a.anotacao.status.nome()),
             rotulo("   Tags: "),
             Span::raw(if a.anotacao.tags.is_empty() { "—".to_string() } else { a.anotacao.tags.join(", ") }),
+            rotulo("   Nota: "),
+            Span::raw(nota.map_or("— (n cria)".to_string(), |n| format!("✎ {}", n.display()))),
         ])),
+        campo("Autores: ", m.autores.clone()),
+        campo("Publicação: ", juntar(&publicacao)),
+        juntar(&identificadores).map(|t| Line::from(t).fg(Color::Gray)),
+        campo("Palavras-chave: ", m.palavras_chave.clone()),
     ].into_iter().flatten());
     if let Some(r) = &m.resumo {
         linhas.push(Line::default());

@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod library;
 pub mod metadata;
+pub mod notas;
 pub mod opener;
 pub mod pdf_texto;
 pub mod ui;

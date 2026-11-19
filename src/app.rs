@@ -32,13 +32,17 @@ pub struct App {
     pub arquivo_anotacoes: Option<PathBuf>,
     /// `Some(texto)` enquanto o usuário edita as tags do selecionado
     pub editando_tags: Option<String>,
+    /// Pasta das notas Markdown; `None` desativa notas
+    pub dir_notas: Option<PathBuf>,
+    /// Índices em `artigos` que têm nota
+    pub com_nota: BTreeSet<usize>,
 }
 
 impl App {
     pub fn new(artigos: Vec<Artigo>, config: Config, aviso_config: Option<String>) -> Self {
         let status_msg = aviso_config.unwrap_or_else(|| {
             format!(
-                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags",
+                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags | n: nota",
                 config.nome_viewer_exibicao()
             )
         });
@@ -62,6 +66,8 @@ impl App {
             anotacoes: Anotacoes::new(),
             arquivo_anotacoes: None,
             editando_tags: None,
+            dir_notas: None,
+            com_nota: BTreeSet::new(),
         };
         app.atualizar_visiveis();
         app
@@ -110,6 +116,28 @@ impl App {
     pub fn confirmar_tags(&mut self) {
         if let Some(texto) = self.editando_tags.take() {
             self.anotar(|a| a.tags = anotacoes::parse_tags(&texto));
+        }
+    }
+
+    /// Define a pasta das notas e verifica quais artigos já têm nota (refazer após editar)
+    pub fn definir_dir_notas(&mut self, dir: PathBuf) {
+        self.com_nota = (0..self.artigos.len()).filter(|&i| crate::notas::caminho(&dir, &self.artigos[i]).exists()).collect();
+        self.dir_notas = Some(dir);
+    }
+
+    /// Cria (se preciso) a nota do selecionado e devolve o caminho para abrir no editor
+    pub fn preparar_nota(&mut self) -> Option<PathBuf> {
+        let i = *self.state.selected().and_then(|s| self.visiveis.get(s))?;
+        let dir = self.dir_notas.as_ref()?;
+        match crate::notas::garantir(dir, &self.artigos[i]) {
+            Ok(nota) => {
+                self.com_nota.insert(i);
+                Some(nota)
+            }
+            Err(e) => {
+                self.status_msg = format!("Erro ao criar nota: {e}");
+                None
+            }
         }
     }
 
@@ -568,5 +596,22 @@ mod tests {
         assert!(app.status_msg.contains("ilegível"));
         app.alternar_status();
         assert_eq!(std::fs::read_to_string(&arquivo).unwrap(), "lixo = [");
+    }
+
+    #[test]
+    fn detecta_notas_existentes_e_cria_nota_do_selecionado() {
+        let dir = tempfile::tempdir().unwrap();
+        let notas = dir.path().join("notas");
+        std::fs::create_dir_all(&notas).unwrap();
+        std::fs::write(notas.join("Artigo 3.md"), "já existia").unwrap();
+
+        let mut app = App::new(criar_artigos_exemplo(), Config::default(), None);
+        app.definir_dir_notas(notas.clone());
+        assert_eq!(app.com_nota.iter().copied().collect::<Vec<_>>(), [2]);
+
+        let nota = app.preparar_nota().unwrap(); // selecionado: Artigo 1
+        assert!(std::fs::read_to_string(nota).unwrap().starts_with("# Artigo 1"));
+        assert!(app.com_nota.contains(&0));
+        assert_eq!(std::fs::read_to_string(notas.join("Artigo 3.md")).unwrap(), "já existia");
     }
 }

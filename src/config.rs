@@ -7,6 +7,15 @@ pub struct Config {
     pub viewer: Option<String>,
     #[serde(default)]
     pub viewer_args: Vec<String>,
+    /// Editor das notas: "nano", "vim", "code"… Pode incluir argumentos ("code --wait").
+    #[serde(default = "default_editor")]
+    pub editor: String,
+    #[serde(default)]
+    pub editor_args: Vec<String>,
+}
+
+fn default_editor() -> String {
+    String::from("nano")
 }
 
 fn default_viewer() -> Option<String> {
@@ -18,13 +27,15 @@ impl Default for Config {
         Self {
             viewer: default_viewer(),
             viewer_args: Vec::new(),
+            editor: default_editor(),
+            editor_args: Vec::new(),
         }
     }
 }
 
 impl Config {
     pub fn caminho_config() -> Option<PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("pdf-viewer-cli").join("config.toml"))
+        dirs::config_dir().map(|dir| dir.join("marginalia").join("config.toml"))
     }
 
     pub fn carregar_ou_criar() -> (Self, Option<String>) {
@@ -53,6 +64,13 @@ impl Config {
         }
     }
 
+    /// Programa e argumentos do editor; vazio cai no padrão (nano)
+    pub fn comando_editor(&self) -> (String, Vec<String>) {
+        let mut partes = self.editor.split_whitespace().map(String::from);
+        let programa = partes.next().unwrap_or_else(default_editor);
+        (programa, partes.chain(self.editor_args.iter().cloned()).collect())
+    }
+
     pub fn nome_viewer_exibicao(&self) -> &str {
         self.viewer
             .as_deref()
@@ -76,6 +94,16 @@ mod tests {
         assert!(config_path.exists());
         assert_eq!(cfg.viewer.as_deref(), Some("zathura"));
         assert!(aviso.unwrap().contains("Config criada"));
+    }
+
+    #[test]
+    fn editor_padrao_nano_e_argumentos_na_propria_string() {
+        let cfg: Config = toml::from_str("viewer = \"zathura\"").unwrap();
+        assert_eq!(cfg.comando_editor(), ("nano".into(), vec![]));
+        let cfg = Config { editor: "code --wait".into(), editor_args: vec!["-n".into()], ..Config::default() };
+        assert_eq!(cfg.comando_editor(), ("code".into(), vec!["--wait".into(), "-n".into()]));
+        let cfg = Config { editor: "  ".into(), ..Config::default() };
+        assert_eq!(cfg.comando_editor().0, "nano");
     }
 
     #[test]
