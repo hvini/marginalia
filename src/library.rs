@@ -1,4 +1,4 @@
-use crate::{cache::Cache, metadata::PdfMetadata};
+use crate::{anotacoes::Anotacao, cache::Cache, metadata::PdfMetadata};
 use std::{fs, io, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,6 +6,7 @@ pub struct Artigo {
     pub titulo: String,
     pub nome_arquivo: String,
     pub meta: PdfMetadata,
+    pub anotacao: Anotacao, // preenchida por `App::carregar_anotacoes`
     pub caminho: PathBuf,
     pub tamanho_kb: u64,
 }
@@ -34,7 +35,7 @@ pub fn carregar_artigos(dir: &Path, cache: Option<&Path>) -> io::Result<Vec<Arti
                 };
 
                 let titulo = meta.titulo.clone().unwrap_or_else(|| nome.clone());
-                artigos.push(Artigo { titulo, nome_arquivo: nome, meta, caminho: path, tamanho_kb });
+                artigos.push(Artigo { titulo, nome_arquivo: nome, meta, anotacao: Anotacao::default(), caminho: path, tamanho_kb });
             }
         }
     }

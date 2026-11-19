@@ -97,7 +97,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn artigo(titulo: &str, meta: PdfMetadata) -> Artigo {
-        Artigo { titulo: titulo.into(), nome_arquivo: "arq".into(), meta, caminho: PathBuf::from("/p/a.pdf"), tamanho_kb: 1 }
+        Artigo { titulo: titulo.into(), nome_arquivo: "arq".into(), meta, anotacao: Default::default(), caminho: PathBuf::from("/p/a.pdf"), tamanho_kb: 1 }
     }
 
     #[test]

@@ -1,10 +1,10 @@
-use std::{cmp::Ordering, collections::BTreeSet, path::Path};
+use std::{cmp::Ordering, collections::BTreeSet, path::{Path, PathBuf}};
 
 use ratatui::{layout::Rect, widgets::TableState};
-use crate::{config::Config, library::Artigo, opener::PdfOpener};
+use crate::{anotacoes::{self, Anotacao, Anotacoes}, config::Config, library::Artigo, opener::PdfOpener};
 
 /// Colunas da tabela, na ordem de exibição; `App::ordem` indexa este array.
-pub const COLUNAS: [&str; 6] = ["Título", "Autores", "Conferência / Journal", "Ano", "Págs", "Refs"];
+pub const COLUNAS: [&str; 8] = ["Título", "Autores", "Conferência / Journal", "Ano", "Págs", "Refs", "Status", "Tags"];
 
 pub struct App {
     pub artigos: Vec<Artigo>,
@@ -26,13 +26,19 @@ pub struct App {
     pub destino_padrao: String,
     /// Mantido vivo enquanto o app roda: no X11 o conteúdo copiado pertence a este processo
     area_transferencia: Option<arboard::Clipboard>,
+    /// Todas as anotações do arquivo, inclusive de PDFs ausentes agora (não podem ser perdidas ao salvar)
+    pub anotacoes: Anotacoes,
+    /// `None` se não há onde salvar ou se o arquivo existente estava ilegível
+    pub arquivo_anotacoes: Option<PathBuf>,
+    /// `Some(texto)` enquanto o usuário edita as tags do selecionado
+    pub editando_tags: Option<String>,
 }
 
 impl App {
     pub fn new(artigos: Vec<Artigo>, config: Config, aviso_config: Option<String>) -> Self {
         let status_msg = aviso_config.unwrap_or_else(|| {
             format!(
-                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | c/C: copiar",
+                "Viewer: {} | Enter: abrir | /: filtrar | s/S: ordenar | Espaço: marcar | e/E: exportar .bib | y/Y: copiar | l: status | t: tags",
                 config.nome_viewer_exibicao()
             )
         });
@@ -53,9 +59,58 @@ impl App {
             exportar_tudo: false,
             destino_padrao: "referencias.bib".into(),
             area_transferencia: None,
+            anotacoes: Anotacoes::new(),
+            arquivo_anotacoes: None,
+            editando_tags: None,
         };
         app.atualizar_visiveis();
         app
+    }
+
+    pub fn carregar_anotacoes(&mut self, arquivo: PathBuf) {
+        match anotacoes::carregar(&arquivo) {
+            Ok(mapa) => {
+                for a in &mut self.artigos {
+                    a.anotacao = mapa.get(&anotacoes::chave(&a.caminho)).cloned().unwrap_or_default();
+                }
+                self.anotacoes = mapa;
+                self.arquivo_anotacoes = Some(arquivo);
+            }
+            Err(e) => {
+                self.status_msg = format!("{} ilegível ({e}); status e tags não serão salvos", arquivo.display());
+            }
+        }
+        self.atualizar_visiveis();
+    }
+
+    /// Altera a anotação do selecionado e persiste imediatamente
+    fn anotar(&mut self, f: impl FnOnce(&mut Anotacao)) {
+        let Some(&i) = self.state.selected().and_then(|s| self.visiveis.get(s)) else { return };
+        let artigo = &mut self.artigos[i];
+        f(&mut artigo.anotacao);
+        self.anotacoes.insert(anotacoes::chave(&artigo.caminho), artigo.anotacao.clone());
+        if let Some(arquivo) = &self.arquivo_anotacoes {
+            if let Err(e) = anotacoes::salvar(arquivo, &self.anotacoes) {
+                self.status_msg = format!("Erro ao salvar anotações: {e}");
+            }
+        }
+        self.atualizar_visiveis();
+    }
+
+    pub fn alternar_status(&mut self) {
+        self.anotar(|a| a.status = a.status.proximo());
+    }
+
+    pub fn iniciar_edicao_tags(&mut self) {
+        if let Some(a) = self.selecionado() {
+            self.editando_tags = Some(a.anotacao.tags.join(", "));
+        }
+    }
+
+    pub fn confirmar_tags(&mut self) {
+        if let Some(texto) = self.editando_tags.take() {
+            self.anotar(|a| a.tags = anotacoes::parse_tags(&texto));
+        }
     }
 
     pub fn selecionado(&self) -> Option<&Artigo> {
@@ -68,10 +123,7 @@ impl App {
         let termos: Vec<String> = self.filtro.to_lowercase().split_whitespace().map(String::from).collect();
 
         self.visiveis = (0..self.artigos.len())
-            .filter(|&i| {
-                let texto = texto_busca(&self.artigos[i]);
-                termos.iter().all(|t| texto.contains(t.as_str()))
-            })
+            .filter(|&i| termos.iter().all(|t| passa(&self.artigos[i], t)))
             .collect();
         let (col, desc) = (self.ordem, self.decrescente);
         let artigos = &self.artigos;
@@ -221,10 +273,25 @@ impl App {
     }
 }
 
+/// Termo do filtro (já em minúsculas): `tag:x` e `status:x` comparam por prefixo só naquele campo
+/// (prefixo para a lista reagir enquanto se digita); os demais procuram em todos os campos.
+fn passa(a: &Artigo, termo: &str) -> bool {
+    if let Some(v) = termo.strip_prefix("tag:") {
+        return a.anotacao.tags.iter().any(|t| t.to_lowercase().starts_with(v));
+    }
+    if let Some(v) = termo.strip_prefix("status:") {
+        let so_letras = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+        return so_letras(a.anotacao.status.nome()).starts_with(&so_letras(v));
+    }
+    texto_busca(a).contains(termo)
+}
+
 /// Tudo em que o filtro procura, em minúsculas
 fn texto_busca(a: &Artigo) -> String {
     let m = &a.meta;
-    [Some(&a.titulo), m.autores.as_ref(), m.venue.as_ref(), m.ano.as_ref(), m.palavras_chave.as_ref(), m.doi.as_ref(), Some(&a.nome_arquivo)]
+    let tags = a.anotacao.tags.join(" ");
+    let status = a.anotacao.status.nome().to_string();
+    [Some(&a.titulo), m.autores.as_ref(), m.venue.as_ref(), m.ano.as_ref(), m.palavras_chave.as_ref(), m.doi.as_ref(), Some(&a.nome_arquivo), Some(&tags), Some(&status)]
         .into_iter()
         .flatten()
         .map(|s| s.to_lowercase())
@@ -248,7 +315,9 @@ fn chave(a: &Artigo, coluna: usize) -> Option<Chave> {
         2 => texto(m.venue.as_ref()),
         3 => m.ano.as_deref().and_then(|a| a.parse().ok()).map(Chave::Num),
         4 => (m.paginas > 0).then_some(Chave::Num(m.paginas as u64)),
-        _ => m.n_referencias.map(|n| Chave::Num(n as u64)),
+        5 => m.n_referencias.map(|n| Chave::Num(n as u64)),
+        6 => Some(Chave::Num(a.anotacao.status as u64)),
+        _ => texto(a.anotacao.tags.first()),
     }
 }
 
@@ -297,6 +366,7 @@ mod tests {
         Artigo {
             titulo: titulo.into(),
             nome_arquivo: titulo.into(),
+            anotacao: Default::default(),
             meta: crate::metadata::PdfMetadata {
                 ano: ano.map(String::from),
                 autores: autores.map(String::from),
@@ -455,5 +525,48 @@ mod tests {
         app.copiar_bibtex(false);
         assert_eq!(app.status_msg, "Nada para copiar");
         assert!(app.area_transferencia.is_none());
+    }
+
+    #[test]
+    fn status_e_tags_persistem_e_filtram() {
+        let dir = tempfile::tempdir().unwrap();
+        let arquivo = dir.path().join(anotacoes::NOME_ARQUIVO);
+        let mut app = App::new(criar_artigos_exemplo(), Config::default(), None);
+        app.carregar_anotacoes(arquivo.clone());
+
+        app.alternar_status(); // Artigo 1: Lendo
+        app.alternar_status(); // Artigo 1: Lido
+        app.editando_tags = Some("Revisão, deep learning".into());
+        app.confirmar_tags();
+        app.proximo();
+        app.alternar_status(); // Artigo 2: Lendo
+
+        for c in "status:lido tag:rev".chars() {
+            app.digitar_filtro(c);
+        }
+        assert_eq!(titulos_visiveis(&app), ["Artigo 1"]);
+        app.limpar_filtro();
+        for c in "status:l".chars() {
+            app.digitar_filtro(c);
+        }
+        assert_eq!(titulos_visiveis(&app), ["Artigo 1", "Artigo 2"]);
+
+        // reabrindo, as anotações voltam
+        let mut outro = App::new(criar_artigos_exemplo(), Config::default(), None);
+        outro.carregar_anotacoes(arquivo);
+        assert_eq!(outro.artigos[0].anotacao.tags, ["Revisão", "deep-learning"]);
+        assert_eq!(outro.artigos[1].anotacao.status, anotacoes::Status::Lendo);
+    }
+
+    #[test]
+    fn arquivo_de_anotacoes_ilegivel_nao_e_sobrescrito() {
+        let dir = tempfile::tempdir().unwrap();
+        let arquivo = dir.path().join(anotacoes::NOME_ARQUIVO);
+        std::fs::write(&arquivo, "lixo = [").unwrap();
+        let mut app = App::new(criar_artigos_exemplo(), Config::default(), None);
+        app.carregar_anotacoes(arquivo.clone());
+        assert!(app.status_msg.contains("ilegível"));
+        app.alternar_status();
+        assert_eq!(std::fs::read_to_string(&arquivo).unwrap(), "lixo = [");
     }
 }

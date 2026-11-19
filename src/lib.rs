@@ -1,3 +1,4 @@
+pub mod anotacoes;
 pub mod app;
 pub mod bibtex;
 pub mod cache;

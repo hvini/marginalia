@@ -48,6 +48,7 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new(artigos, config, aviso_config);
     app.destino_padrao = dir_path.join("referencias.bib").to_string_lossy().into_owned();
+    app.carregar_anotacoes(dir_path.join(marginalia::anotacoes::NOME_ARQUIVO));
     let res = run_app(&mut terminal, &mut app, &opener);
 
     disable_raw_mode()?;
@@ -83,6 +84,16 @@ fn run_app<B: ratatui::backend::Backend>(
                 let _ = execute!(io::stdout(), EnableMouseCapture);
                 let _ = io::stdout().flush();
             }
+            // Digitação das tags do selecionado
+            Event::Key(key) if key.kind == KeyEventKind::Press && app.editando_tags.is_some() => match key.code {
+                KeyCode::Enter => app.confirmar_tags(),
+                KeyCode::Esc => app.editando_tags = None,
+                KeyCode::Backspace => {
+                    app.editando_tags.as_mut().map(String::pop);
+                }
+                KeyCode::Char(c) => app.editando_tags.as_mut().into_iter().for_each(|t| t.push(c)),
+                _ => {}
+            },
             // Digitação do caminho do .bib
             Event::Key(key) if key.kind == KeyEventKind::Press && app.destino_bib.is_some() => match key.code {
                 KeyCode::Enter => app.confirmar_exportacao(),
@@ -114,6 +125,8 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char(' ') => app.alternar_marca(),
                     KeyCode::Char('e') => app.iniciar_exportacao(false),
                     KeyCode::Char('E') => app.iniciar_exportacao(true),
+                    KeyCode::Char('l') => app.alternar_status(),
+                    KeyCode::Char('t') => app.iniciar_edicao_tags(),
                     KeyCode::Char('y') => app.copiar_bibtex(false),
                     KeyCode::Char('Y') => app.copiar_bibtex(true),
                     KeyCode::Down | KeyCode::Char('j') => app.proximo(),

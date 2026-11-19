@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{app::{App, COLUNAS}, library::Artigo};
+use crate::{anotacoes::Status, app::{App, COLUNAS}, library::Artigo};
 
 const SIMBOLO_SELECAO: &str = "▶ ";
 
@@ -25,7 +25,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if altura_detalhes > 0 {
         render_detalhes(f, app.selecionado(), area_detalhes);
     }
-    let status = if let Some(destino) = &app.destino_bib {
+    let status = if let Some(tags) = &app.editando_tags {
+        Paragraph::new(format!(" Tags (separadas por vírgula): {tags}█   (Enter salva, Esc cancela)")).fg(Color::Black).bg(Color::Cyan)
+    } else if let Some(destino) = &app.destino_bib {
         let n = app.alvos_exportacao(app.exportar_tudo).len();
         Paragraph::new(format!(" Exportar {n} artigos para: {destino}█   (Enter grava, Esc cancela)")).fg(Color::Black).bg(Color::Green)
     } else if app.editando_filtro {
@@ -37,20 +39,24 @@ pub fn render(f: &mut Frame, app: &mut App) {
 }
 
 fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
-    let larguras = [
+    // Tags só cabem em terminais largos; continuam no painel de detalhes e no filtro
+    let n_colunas = if area.width >= 110 { COLUNAS.len() } else { COLUNAS.len() - 1 };
+    let larguras = &[
         Constraint::Fill(5), // Título
         Constraint::Fill(2), // Autores
         Constraint::Fill(3), // Venue
         Constraint::Length(6), // Ano
         Constraint::Length(6), // Págs
         Constraint::Length(6), // Refs
-    ];
+        Constraint::Length(10), // Status
+        Constraint::Fill(2), // Tags
+    ][..n_colunas];
     // Mesmas colunas que a Table vai calcular, para cortar o texto com reticências
     let interno = Rect { width: area.width.saturating_sub(2 + SIMBOLO_SELECAO.chars().count() as u16), ..area };
-    let colunas: Vec<usize> = Layout::horizontal(larguras).spacing(1).split(interno).iter().map(|r| r.width as usize).collect();
+    let colunas: Vec<usize> = Layout::horizontal(larguras.iter().copied()).spacing(1).split(interno).iter().map(|r| r.width as usize).collect();
 
     let seta = if app.decrescente { " ▼" } else { " ▲" };
-    let header = Row::new(COLUNAS.iter().enumerate().map(|(i, c)| if i == app.ordem { format!("{c}{seta}") } else { c.to_string() }))
+    let header = Row::new(COLUNAS[..n_colunas].iter().enumerate().map(|(i, c)| if i == app.ordem { format!("{c}{seta}") } else { c.to_string() }))
         .style(Style::default().fg(Color::Yellow).bold());
 
     let rows = app.visiveis.iter().map(|&i| {
@@ -64,11 +70,21 @@ fn render_tabela(f: &mut Frame, app: &mut App, area: Rect) {
             m.ano.clone().unwrap_or_else(|| "—".into()),
             if m.paginas > 0 { m.paginas.to_string() } else { "—".into() },
             m.n_referencias.map_or("—".into(), |n| n.to_string()),
+            a.anotacao.status.nome().to_string(),
+            if a.anotacao.tags.is_empty() { "—".into() } else { a.anotacao.tags.join(", ") },
         ];
-        Row::new(celulas.iter().zip(&colunas).map(|(t, &w)| Cell::from(cortar(t, w))))
+        let cor_status = match a.anotacao.status {
+            Status::ParaLer => Color::Reset,
+            Status::Lendo => Color::Yellow,
+            Status::Lido => Color::Green,
+        };
+        Row::new(celulas.iter().zip(&colunas).enumerate().map(|(c, (t, &w))| {
+            let cell = Cell::from(cortar(t, w));
+            if c == 6 { cell.fg(cor_status) } else { cell }
+        }))
     });
 
-    let table = Table::new(rows, larguras)
+    let table = Table::new(rows, larguras.iter().copied())
         .header(header)
         .column_spacing(1)
         .block(Block::default().borders(Borders::ALL).title(titulo_tabela(app)))
@@ -121,6 +137,12 @@ fn render_detalhes(f: &mut Frame, artigo: Option<&Artigo>, area: Rect) {
         campo("Publicação: ", juntar(&publicacao)),
         juntar(&identificadores).map(|t| Line::from(t).fg(Color::Gray)),
         campo("Palavras-chave: ", m.palavras_chave.clone()),
+        Some(Line::from(vec![
+            rotulo("Status: "),
+            Span::raw(a.anotacao.status.nome()),
+            rotulo("   Tags: "),
+            Span::raw(if a.anotacao.tags.is_empty() { "—".to_string() } else { a.anotacao.tags.join(", ") }),
+        ])),
     ].into_iter().flatten());
     if let Some(r) = &m.resumo {
         linhas.push(Line::default());
@@ -183,6 +205,7 @@ mod tests {
                 doi: Some("10.1002/hbm.25850".into()),
                 ..Default::default()
             },
+            anotacao: Default::default(),
             caminho: PathBuf::from("/docs/coupe.pdf"),
             tamanho_kb: 512,
         }];
@@ -215,7 +238,9 @@ mod tests {
     #[test]
     fn terminal_baixo_oculta_painel_de_detalhes() {
         let conteudo = tela(&mut app_exemplo(), 80, 12);
-        assert!(conteudo.contains("Coupé et"));
+        assert!(conteudo.contains("Coupé"));
+        assert!(conteudo.contains("Para ler"));
+        assert!(!conteudo.contains("Tags"), "coluna Tags some em terminal estreito");
         assert!(!conteudo.contains("Detalhes"));
     }
 
